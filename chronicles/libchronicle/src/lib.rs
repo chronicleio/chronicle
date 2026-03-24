@@ -8,7 +8,6 @@ pub mod error;
 pub mod observability;
 pub mod state_machine;
 pub mod timeline;
-pub mod write_group;
 
 #[derive(Debug, Clone)]
 pub struct Event {

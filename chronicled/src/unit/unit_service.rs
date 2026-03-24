@@ -7,7 +7,7 @@ use crate::unit::timeline_state::TimelineStateManager;
 use chronicle_proto::pb_ext::chronicle_server::Chronicle;
 use chronicle_proto::pb_ext::{
     FenceRequest, FenceResponse, FetchEventsRequest, FetchEventsResponse, RecordEventsRequest,
-    RecordEventsResponse, RecordEventsResponseItem, StatusCode,
+    RecordEventsResponse, StatusCode,
 };
 use futures_util::StreamExt;
 use std::sync::Arc;
@@ -65,59 +65,97 @@ impl Chronicle for UnitService {
             while let Some(request) = stream.next().await {
                 match request {
                     Ok(req) => {
+                        let start = Instant::now();
+                        let item_count = req.items.len();
+
+                        // Extract timeline_id and term from first item.
+                        let (timeline_id, term) = req.items.first()
+                            .and_then(|i| i.event.as_ref())
+                            .map(|e| (e.timeline_id, e.term))
+                            .unwrap_or((0, 0));
+
+                        metrics.write_requests.add(1, &[]);
+                        metrics.write_queue_depth.add(item_count as i64, &[]);
+
+                        // Phase 1: dispatch all items, collect response channels.
+                        let mut total_bytes: u64 = 0;
+                        let mut channels = Vec::with_capacity(item_count);
+                        let mut dispatch_failed = false;
+
                         for item in req.items {
-                            let start = Instant::now();
-                            metrics.write_requests.add(1, &[]);
-                            metrics.write_queue_depth.add(1, &[]);
-                            let payload_len = item.event.as_ref()
+                            total_bytes += item.event.as_ref()
                                 .and_then(|e| e.payload.as_ref())
                                 .map_or(0, |p| p.len() as u64);
 
-                            let (item_tx, mut item_rx) = mpsc::channel(1);
+                            let (item_tx, item_rx) = mpsc::channel(1);
                             let envelope = Envelope {
                                 request: item,
                                 res_tx: item_tx,
                             };
                             if let Err(_e) = write_group.dispatch(envelope).await {
-                                metrics.write_queue_depth.add(-1, &[]);
+                                metrics.write_queue_depth.add(-(item_count as i64), &[]);
                                 metrics.write_errors.add(1, &[]);
                                 metrics.failed_requests.add(1, &[]);
                                 let response = RecordEventsResponse {
-                                    items: vec![RecordEventsResponseItem {
-                                        code: StatusCode::InvalidTerm.into(),
-                                        event: None,
-                                    }],
+                                    code: StatusCode::InvalidTerm.into(),
+                                    synced_offset: -1,
+                                    timeline_id,
+                                    term,
                                 };
                                 if tx.send(Ok(response)).await.is_err() {
                                     return;
                                 }
-                                continue;
+                                dispatch_failed = true;
+                                break;
                             }
+                            channels.push(item_rx);
+                        }
+
+                        if dispatch_failed {
+                            continue;
+                        }
+
+                        // Phase 2: wait for all responses, track max synced offset.
+                        let mut max_offset: i64 = -1;
+                        let mut error_code: Option<i32> = None;
+                        let error_term: i64 = term;
+
+                        for mut item_rx in channels {
                             if let Some(result) = item_rx.recv().await {
                                 match result {
                                     Ok(event) => {
-                                        metrics.write_queue_depth.add(-1, &[]);
-                                        metrics.write_latency.record(start.elapsed().as_secs_f64(), &[]);
-                                        metrics.write_bytes.add(payload_len, &[]);
-                                        let response = RecordEventsResponse {
-                                            items: vec![RecordEventsResponseItem {
-                                                code: StatusCode::Ok.into(),
-                                                event: Some(event),
-                                            }],
-                                        };
-                                        if tx.send(Ok(response)).await.is_err() {
-                                            return;
+                                        if event.offset > max_offset {
+                                            max_offset = event.offset;
                                         }
                                     }
                                     Err(status) => {
-                                        metrics.write_queue_depth.add(-1, &[]);
                                         metrics.write_errors.add(1, &[]);
-                                        if tx.send(Err(status)).await.is_err() {
-                                            return;
+                                        // Parse error — check if it's a term/fence issue.
+                                        let msg = status.message();
+                                        if msg.contains("INVALID_TERM") {
+                                            error_code = Some(StatusCode::InvalidTerm.into());
+                                        } else {
+                                            error_code = Some(StatusCode::Fenced.into());
                                         }
+                                        break;
                                     }
                                 }
                             }
+                        }
+
+                        metrics.write_queue_depth.add(-(item_count as i64), &[]);
+
+                        // Phase 3: send one cumulative response.
+                        let response = RecordEventsResponse {
+                            code: error_code.unwrap_or(StatusCode::Ok.into()),
+                            synced_offset: max_offset,
+                            timeline_id,
+                            term: error_term,
+                        };
+                        metrics.write_latency.record(start.elapsed().as_secs_f64(), &[]);
+                        metrics.write_bytes.add(total_bytes, &[]);
+                        if tx.send(Ok(response)).await.is_err() {
+                            return;
                         }
                     }
                     Err(e) => {

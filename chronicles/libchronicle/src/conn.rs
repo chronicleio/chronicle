@@ -5,10 +5,9 @@ use chronicle_proto::pb_ext::{
     chronicle_client::ChronicleClient,
 };
 use dashmap::DashMap;
-use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::{Channel, Endpoint};
 use tracing::{info, warn};
@@ -82,11 +81,14 @@ impl Conn {
         Ok(response.into_inner())
     }
 
-    /// Open a managed record stream. Returns a `RecordHandle` that hides
-    /// the bidirectional gRPC stream behind a simple request-response API.
-    pub async fn open_record_handle(&self) -> Result<RecordHandle, ChronicleError> {
+    /// Open a fire-and-forget record stream. Responses are forwarded to `ack_tx`
+    /// by a background reader task.
+    pub async fn open_record_stream(
+        &self,
+        ack_tx: mpsc::Sender<UnitAck>,
+    ) -> Result<RecordStream, ChronicleError> {
         let mut client = self.client.clone();
-        let (stream_tx, stream_rx) = mpsc::channel(64);
+        let (stream_tx, stream_rx) = mpsc::channel::<RecordEventsRequest>(64);
         let stream = ReceiverStream::new(stream_rx);
         let response = client
             .record(stream)
@@ -94,13 +96,10 @@ impl Conn {
             .map_err(|e| ChronicleError::Transport(e.to_string()))?;
         let response_stream = response.into_inner();
 
-        let (req_tx, req_rx) = mpsc::channel::<RecordRequest>(64);
         let ep = self.endpoint.clone();
-        tokio::spawn(async move {
-            record_loop(ep, req_rx, stream_tx, response_stream).await;
-        });
+        tokio::spawn(response_reader(ep, response_stream, ack_tx));
 
-        Ok(RecordHandle { tx: req_tx })
+        Ok(RecordStream { tx: stream_tx })
     }
 
     pub async fn open_fetch_stream(
@@ -125,98 +124,74 @@ impl Conn {
 }
 
 // ---------------------------------------------------------------------------
-// RecordHandle — hides bidirectional stream behind request-response
+// RecordStream — fire-and-forget sender into a per-unit gRPC stream
 // ---------------------------------------------------------------------------
 
-struct RecordRequest {
-    request: RecordEventsRequest,
-    response_tx: oneshot::Sender<Result<RecordEventsResponse, ChronicleError>>,
+pub struct RecordStream {
+    tx: mpsc::Sender<RecordEventsRequest>,
 }
 
-/// A handle to a managed record stream. Send a request, get the response
-/// back — stream ordering guarantees correct matching.
-#[derive(Clone)]
-pub struct RecordHandle {
-    tx: mpsc::Sender<RecordRequest>,
-}
-
-impl RecordHandle {
-    /// Send a record request and wait for the response.
-    pub async fn record(
-        &self,
-        request: RecordEventsRequest,
-    ) -> Result<RecordEventsResponse, ChronicleError> {
-        let (resp_tx, resp_rx) = oneshot::channel();
+impl RecordStream {
+    /// Send a batch into the stream without waiting for ack.
+    pub async fn send(&self, request: RecordEventsRequest) -> Result<(), ChronicleError> {
         self.tx
-            .send(RecordRequest {
-                request,
-                response_tx: resp_tx,
-            })
+            .send(request)
             .await
-            .map_err(|_| ChronicleError::Transport("record stream closed".into()))?;
-        resp_rx
-            .await
-            .map_err(|_| ChronicleError::Transport("response channel closed".into()))?
+            .map_err(|_| ChronicleError::Transport("record stream closed".into()))
     }
 }
 
-/// Internal loop: reads requests, sends them to the gRPC stream, reads
-/// responses in order, and routes them back to callers.
-async fn record_loop(
-    endpoint: String,
-    mut req_rx: mpsc::Receiver<RecordRequest>,
-    stream_tx: mpsc::Sender<RecordEventsRequest>,
-    mut response_stream: tonic::Streaming<RecordEventsResponse>,
-) {
-    let mut pending: VecDeque<oneshot::Sender<Result<RecordEventsResponse, ChronicleError>>> =
-        VecDeque::new();
+// ---------------------------------------------------------------------------
+// UnitAck — a cumulative ack received from a unit
+// ---------------------------------------------------------------------------
 
+pub struct UnitAck {
+    pub endpoint: String,
+    pub result: Result<RecordEventsResponse, ChronicleError>,
+}
+
+/// Background task: reads cumulative ack responses from a unit's gRPC stream
+/// and forwards them to the shared ack channel.
+async fn response_reader(
+    endpoint: String,
+    mut stream: tonic::Streaming<RecordEventsResponse>,
+    ack_tx: mpsc::Sender<UnitAck>,
+) {
     loop {
-        tokio::select! {
-            req = req_rx.recv() => {
-                match req {
-                    Some(req) => {
-                        if stream_tx.send(req.request).await.is_err() {
-                            let _ = req.response_tx.send(Err(
-                                ChronicleError::Transport("stream send failed".into())
-                            ));
-                            break;
-                        }
-                        pending.push_back(req.response_tx);
-                    }
-                    None => break,
+        match stream.message().await {
+            Ok(Some(resp)) => {
+                if ack_tx
+                    .send(UnitAck {
+                        endpoint: endpoint.clone(),
+                        result: Ok(resp),
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
                 }
             }
-            response = response_stream.message() => {
-                match response {
-                    Ok(Some(resp)) => {
-                        if let Some(tx) = pending.pop_front() {
-                            let _ = tx.send(Ok(resp));
-                        }
-                    }
-                    Ok(None) => {
-                        for tx in pending.drain(..) {
-                            let _ = tx.send(Err(
-                                ChronicleError::Transport("stream ended".into())
-                            ));
-                        }
-                        break;
-                    }
-                    Err(e) => {
-                        let msg = e.to_string();
-                        for tx in pending.drain(..) {
-                            let _ = tx.send(Err(
-                                ChronicleError::Transport(msg.clone())
-                            ));
-                        }
-                        break;
-                    }
-                }
+            Ok(None) => {
+                let _ = ack_tx
+                    .send(UnitAck {
+                        endpoint: endpoint.clone(),
+                        result: Err(ChronicleError::Transport("stream ended".into())),
+                    })
+                    .await;
+                break;
+            }
+            Err(e) => {
+                let _ = ack_tx
+                    .send(UnitAck {
+                        endpoint: endpoint.clone(),
+                        result: Err(ChronicleError::Transport(e.to_string())),
+                    })
+                    .await;
+                break;
             }
         }
     }
-
-    warn!(endpoint = %endpoint, "record_loop ended");
+    warn!(endpoint = %endpoint, "response_reader: ended");
 }
 
 // ---------------------------------------------------------------------------

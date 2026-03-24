@@ -21,7 +21,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Timeline with replication
-    let replicated = chronicle
+    let mut replicated = chronicle
         .open_timeline(
             "replicated-timeline",
             TimelineOptions::new().replication_factor(3),
@@ -30,7 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("opened replicated timeline (rf=3)");
 
     // Timeline with schema and compaction
-    let compacted = chronicle
+    let mut compacted = chronicle
         .open_timeline(
             "compacted-timeline",
             TimelineOptions::new()
@@ -42,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("opened compacted timeline with schema");
 
     // Timeline with retention
-    let retained = chronicle
+    let mut retained = chronicle
         .open_timeline(
             "retained-timeline",
             TimelineOptions::new()
@@ -53,7 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("opened retained timeline (7 days)");
 
     // Timeline with custom batching
-    let fast = chronicle
+    let mut fast = chronicle
         .open_timeline(
             "fast-timeline",
             TimelineOptions::new()

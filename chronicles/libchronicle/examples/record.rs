@@ -8,7 +8,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         catalog::build_catalog(&catalog::CatalogOptions::default()).await?,
     );
     let chronicle = Chronicle::new(catalog, ChronicleOptions::new());
-    let timeline = chronicle
+    let mut timeline = chronicle
         .open_timeline("record-example", TimelineOptions::new().replication_factor(1))
         .await?;
 

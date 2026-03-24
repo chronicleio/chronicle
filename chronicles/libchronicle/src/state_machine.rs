@@ -1,97 +1,58 @@
-use crate::conn::{Conn, ConnPool, RecordHandle};
+use crate::conn::{Conn, ConnPool, RecordStream, UnitAck};
 use crate::ensemble::select_ensemble;
 use crate::error::ChronicleError;
 use crate::Event as UserEvent;
+use crate::Offset;
 use catalog::Catalog;
 use chronicle_proto::pb_catalog::Segment;
 use chronicle_proto::pb_ext::{
     RecordEventsRequest, RecordEventsRequestItem, StatusCode,
 };
 use futures_util::future::join_all;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 
 const MAX_FENCE_ATTEMPTS: u64 = 5;
-const MAX_REPLACE_ATTEMPTS: u32 = 3;
-const FENCE_TIMEOUT: Duration = Duration::from_secs(30);
-const APPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
 // ---------------------------------------------------------------------------
-// Broadcast — run an operation on all endpoints concurrently with timeout
+// Event loop state — owned by the spawned task, no mutexes needed
 // ---------------------------------------------------------------------------
 
-async fn broadcast<F, Fut, T>(
-    endpoints: &[String],
-    op: F,
-    timeout: Duration,
-) -> (Vec<(String, T)>, Vec<(String, ChronicleError)>)
-where
-    F: Fn(String) -> Fut,
-    Fut: std::future::Future<Output = Result<T, ChronicleError>> + Send + 'static,
-    T: Send + 'static,
-{
-    let futs = endpoints.iter().map(|ep| {
-        let ep = ep.clone();
-        let fut = op(ep.clone());
-        async move {
-            match tokio::time::timeout(timeout, fut).await {
-                Ok(result) => (ep, result),
-                Err(_) => (
-                    ep.clone(),
-                    Err(ChronicleError::Transport(format!(
-                        "operation timed out for {}",
-                        ep
-                    ))),
-                ),
-            }
-        }
-    });
-
-    let results = join_all(futs).await;
-
-    let mut successes = Vec::new();
-    let mut failures = Vec::new();
-    for (ep, result) in results {
-        match result {
-            Ok(val) => successes.push((ep, val)),
-            Err(e) => failures.push((ep, e)),
-        }
-    }
-
-    (successes, failures)
-}
-
-// ---------------------------------------------------------------------------
-// Private state
-// ---------------------------------------------------------------------------
-
-struct State {
+struct LoopState {
     timeline_id: i64,
     term: i64,
     lrs: i64,
     lra: i64,
-    replication_factor: usize,
     needs_trunc: bool,
-}
-
-struct Inner {
-    state: Mutex<State>,
     catalog: Arc<Catalog>,
     pool: Arc<ConnPool>,
     timeline_name: String,
-    /// Ensemble endpoints → record handles.
-    handles: Mutex<HashMap<String, RecordHandle>>,
+    streams: HashMap<String, RecordStream>,
+    unit_synced: HashMap<String, i64>,
+    ack_tx: mpsc::Sender<UnitAck>,
+}
+
+struct InflightBatch {
+    max_offset: i64,
+    callbacks: Vec<(i64, oneshot::Sender<Result<Offset, ChronicleError>>)>,
+}
+
+struct PendingEvent {
+    event: UserEvent,
+    tx: oneshot::Sender<Result<Offset, ChronicleError>>,
 }
 
 // ---------------------------------------------------------------------------
-// StateMachine
+// StateMachine — a handle to the single-threaded event loop
 // ---------------------------------------------------------------------------
 
-#[derive(Clone)]
 pub(crate) struct StateMachine {
-    inner: Arc<Inner>,
+    event_tx: Option<mpsc::Sender<PendingEvent>>,
+    loop_task: Option<tokio::task::JoinHandle<()>>,
+    timeline_id: i64,
 }
 
 impl StateMachine {
@@ -101,6 +62,8 @@ impl StateMachine {
         name: &str,
         replication_factor: usize,
         _schema_id: Option<String>,
+        max_batch_size: usize,
+        linger: Duration,
     ) -> Result<Self, ChronicleError> {
         let tc = catalog.tl_new_term(name).await?;
 
@@ -135,37 +98,18 @@ impl StateMachine {
             "new term: fencing ensemble"
         );
 
-        let sm = Self {
-            inner: Arc::new(Inner {
-                state: Mutex::new(State {
-                    timeline_id: tc.timeline_id,
-                    term: tc.term,
-                    lrs: 0,
-                    lra: 0,
-                    replication_factor,
-                    needs_trunc: false,
-                }),
-                catalog: catalog.clone(),
-                pool: pool.clone(),
-                timeline_name: name.to_string(),
-                handles: Mutex::new(HashMap::new()),
-            }),
-        };
+        // Create the shared ack channel.
+        let (ack_tx, ack_rx) = mpsc::channel::<UnitAck>(256);
 
-        let (ensemble, lra) = sm
-            .fence_ensemble(ensemble, tc.timeline_id, tc.term)
-            .await?;
+        // Fence ensemble and open record streams.
+        let (ensemble, lra, streams) =
+            fence_ensemble(&pool, &ack_tx, ensemble, tc.timeline_id, tc.term).await?;
 
-        {
-            let mut s = sm.inner.state.lock().unwrap();
-            s.lrs = lra;
-            s.lra = lra;
-            s.needs_trunc = lra > 0;
-        }
+        let needs_trunc = lra > 0;
 
         // Update the writable segment with the selected ensemble.
         let updated_seg = Segment {
-            ensemble,
+            ensemble: ensemble.clone(),
             start_offset: lra + 1,
         };
         catalog
@@ -184,308 +128,378 @@ impl StateMachine {
             "new term: complete"
         );
 
-        Ok(sm)
-    }
+        // Initialize per-unit synced watermarks.
+        let unit_synced: HashMap<String, i64> = streams
+            .keys()
+            .map(|ep| (ep.clone(), lra))
+            .collect();
 
-    // -- Getters -------------------------------------------------------------
+        // Build loop state and spawn the event loop.
+        let state = LoopState {
+            timeline_id: tc.timeline_id,
+            term: tc.term,
+            lrs: lra,
+            lra,
+            needs_trunc,
+            catalog,
+            pool,
+            timeline_name: name.to_string(),
+            streams,
+            unit_synced,
+            ack_tx,
+        };
+
+        let (event_tx, event_rx) = mpsc::channel::<PendingEvent>(max_batch_size * 2);
+        let loop_task = tokio::spawn(event_loop(state, event_rx, ack_rx, max_batch_size, linger));
+
+        Ok(Self {
+            event_tx: Some(event_tx),
+            loop_task: Some(loop_task),
+            timeline_id: tc.timeline_id,
+        })
+    }
 
     pub fn timeline_id(&self) -> i64 {
-        self.inner.state.lock().unwrap().timeline_id
+        self.timeline_id
     }
 
-    pub fn lra(&self) -> i64 {
-        self.inner.state.lock().unwrap().lra
+    pub async fn record(&self, event: UserEvent) -> Result<Offset, ChronicleError> {
+        let sender = self
+            .event_tx
+            .as_ref()
+            .ok_or_else(|| ChronicleError::Internal("timeline closed".into()))?;
+        let (tx, rx) = oneshot::channel();
+        sender
+            .send(PendingEvent { event, tx })
+            .await
+            .map_err(|_| ChronicleError::Internal("timeline closed".into()))?;
+        rx.await
+            .map_err(|_| ChronicleError::Internal("ack channel dropped".into()))?
     }
 
-    // -- Write path ----------------------------------------------------------
-
-    /// Assign offsets and build proto items. Returns `(items, offsets)`.
-    pub(crate) fn prepare_batch(
-        &self,
-        events: Vec<UserEvent>,
-    ) -> (Vec<RecordEventsRequestItem>, Vec<i64>) {
-        let mut s = self.inner.state.lock().unwrap();
-        let mut items = Vec::with_capacity(events.len());
-        let mut offsets = Vec::with_capacity(events.len());
-
-        for event in events {
-            let offset = s.lrs + 1;
-            s.lrs = offset;
-
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as i64;
-
-            let proto_event = chronicle_proto::pb_ext::Event {
-                timeline_id: s.timeline_id,
-                term: s.term,
-                offset,
-                payload: Some(event.payload.into()),
-                crc32: None,
-                timestamp: now,
-                schema_id: 0,
-            };
-
-            let item = RecordEventsRequestItem {
-                event: Some(proto_event),
-                trunc: s.needs_trunc,
-                lra: s.lra,
-            };
-            s.needs_trunc = false;
-
-            items.push(item);
-            offsets.push(offset);
+    pub async fn close(&mut self) {
+        // Drop the sender so the event loop sees channel closed and exits.
+        self.event_tx.take();
+        if let Some(task) = self.loop_task.take() {
+            let _ = task.await;
         }
-
-        (items, offsets)
     }
+}
 
-    /// Send items to all ensemble members concurrently. Blocks until all
-    /// units respond. On failure, replaces the unit and retries.
-    /// Advances LRA on success.
-    pub(crate) async fn apply(
-        &self,
-        items: Vec<RecordEventsRequestItem>,
-    ) -> Result<(), ChronicleError> {
-        let mut endpoints: Vec<String> = {
-            self.inner.handles.lock().unwrap().keys().cloned().collect()
-        };
+// ---------------------------------------------------------------------------
+// Event loop — single-threaded, owns all mutable state
+// ---------------------------------------------------------------------------
 
-        if endpoints.is_empty() {
-            return Err(ChronicleError::UnitNotEnough("no connected units".into()));
-        }
+async fn event_loop(
+    mut state: LoopState,
+    mut event_rx: mpsc::Receiver<PendingEvent>,
+    mut ack_rx: mpsc::Receiver<UnitAck>,
+    max_batch_size: usize,
+    linger: Duration,
+) {
+    let mut batch: Vec<PendingEvent> = Vec::with_capacity(max_batch_size);
+    let mut inflight: VecDeque<InflightBatch> = VecDeque::new();
+    let linger_sleep = tokio::time::sleep(far_future());
+    tokio::pin!(linger_sleep);
+    let mut linger_active = false;
 
-        let request = RecordEventsRequest { items };
-        let handles = self.inner.handles.lock().unwrap().clone();
+    loop {
+        tokio::select! {
+            // Prioritize ack processing to keep watermarks advancing.
+            biased;
 
-        let results = self
-            .broadcast_with_replace(
-                &mut endpoints,
-                |ep| {
-                    let handle = handles.get(&ep).cloned();
-                    let req = request.clone();
-                    async move {
-                        let h = handle.ok_or_else(|| {
-                            ChronicleError::Transport(format!("no handle for {}", ep))
-                        })?;
-                        h.record(req).await
+            ack = ack_rx.recv() => {
+                match ack {
+                    Some(unit_ack) => {
+                        process_ack(&mut state, &mut inflight, unit_ack);
                     }
-                },
-                APPLY_TIMEOUT,
-            )
-            .await?;
-
-        // All units responded. Check responses and advance LRA.
-        let mut max_offset: i64 = 0;
-        for (_ep, response) in &results {
-            for item in &response.items {
-                if item.code != StatusCode::Ok as i32 {
-                    if item.code == StatusCode::Fenced as i32 {
-                        let s = self.inner.state.lock().unwrap();
-                        return Err(ChronicleError::Fenced {
-                            timeline_id: s.timeline_id,
-                            term: s.term,
-                        });
-                    }
-                    warn!(code = item.code, "apply: unit returned error code");
+                    None => break,
                 }
-                if let Some(ref event) = item.event {
-                    if event.offset > max_offset {
-                        max_offset = event.offset;
+            }
+
+            event = event_rx.recv() => {
+                match event {
+                    Some(e) => {
+                        if batch.is_empty() && !linger_active {
+                            linger_sleep
+                                .as_mut()
+                                .reset(tokio::time::Instant::now() + linger);
+                            linger_active = true;
+                        }
+                        batch.push(e);
+                        if batch.len() >= max_batch_size {
+                            flush_batch(&mut state, &mut batch, &mut inflight).await;
+                            linger_sleep.as_mut().reset(tokio::time::Instant::now() + far_future());
+                            linger_active = false;
+                        }
+                    }
+                    None => {
+                        // Channel closed — flush remaining and drain inflight.
+                        if !batch.is_empty() {
+                            flush_batch(&mut state, &mut batch, &mut inflight).await;
+                        }
+                        drain_remaining(&mut state, &mut inflight, &mut ack_rx).await;
+                        return;
                     }
                 }
             }
-        }
 
-        if max_offset > 0 {
-            let mut s = self.inner.state.lock().unwrap();
-            s.lra = max_offset;
-        }
-
-        Ok(())
-    }
-
-    // -- Ensemble management -------------------------------------------------
-
-    /// Select a replacement unit, fence it, open a record handle.
-    /// Returns `(new_endpoint, lra)`.
-    async fn replace_unit(
-        &self,
-        failed_endpoint: &str,
-    ) -> Result<(String, i64), ChronicleError> {
-        let (timeline_id, term) = {
-            let s = self.inner.state.lock().unwrap();
-            (s.timeline_id, s.term)
-        };
-
-        let exclude: Vec<String> = {
-            let handles = self.inner.handles.lock().unwrap();
-            let mut ex: Vec<String> = handles.keys().cloned().collect();
-            if !ex.contains(&failed_endpoint.to_string()) {
-                ex.push(failed_endpoint.to_string());
-            }
-            ex
-        };
-
-        let units = self.inner.catalog.list_writable_units().await?;
-        let replacement = select_ensemble(&units, 1, &[], &exclude).ok_or_else(|| {
-            ChronicleError::UnitNotEnough("no available unit to replace failed unit".into())
-        })?;
-        let new_ep = replacement[0].clone();
-
-        let conn = self.inner.pool.get_or_connect(&new_ep)?;
-        let lra = fence_unit(&conn, &new_ep, timeline_id, term).await?;
-        let handle = conn.open_record_handle().await?;
-
-        {
-            let mut handles = self.inner.handles.lock().unwrap();
-            handles.remove(failed_endpoint);
-            handles.insert(new_ep.clone(), handle);
-        }
-
-        // Update segment in catalog.
-        self.update_segment(failed_endpoint, &new_ep).await?;
-
-        info!(old = %failed_endpoint, new = %new_ep, "replace_unit: replaced");
-        Ok((new_ep, lra))
-    }
-
-    /// Broadcast with automatic replacement on failure.
-    async fn broadcast_with_replace<F, Fut, T>(
-        &self,
-        endpoints: &mut Vec<String>,
-        op: F,
-        timeout: Duration,
-    ) -> Result<Vec<(String, T)>, ChronicleError>
-    where
-        F: Fn(String) -> Fut + Clone,
-        Fut: std::future::Future<Output = Result<T, ChronicleError>> + Send + 'static,
-        T: Send + 'static,
-    {
-        let mut all_successes = Vec::new();
-        let mut pending = endpoints.clone();
-
-        for round in 0..=MAX_REPLACE_ATTEMPTS {
-            if pending.is_empty() {
-                break;
-            }
-            if round > 0 {
-                warn!(round = round, "broadcast_with_replace: retrying");
-            }
-
-            let (successes, failures) = broadcast(&pending, op.clone(), timeout).await;
-            all_successes.extend(successes);
-
-            if failures.is_empty() {
-                break;
-            }
-
-            for (ep, e) in &failures {
-                warn!(endpoint = %ep, error = %e, "broadcast_with_replace: unit failed");
-            }
-
-            if round == MAX_REPLACE_ATTEMPTS {
-                return Err(ChronicleError::UnitNotEnough(format!(
-                    "failed on {} units after {} rounds",
-                    failures.len(),
-                    MAX_REPLACE_ATTEMPTS
-                )));
-            }
-
-            let mut next_pending = Vec::new();
-            for (failed_ep, _) in failures {
-                let (new_ep, _lra) = self.replace_unit(&failed_ep).await?;
-                if let Some(pos) = endpoints.iter().position(|e| e == &failed_ep) {
-                    endpoints[pos] = new_ep.clone();
+            _ = &mut linger_sleep, if linger_active => {
+                if !batch.is_empty() {
+                    flush_batch(&mut state, &mut batch, &mut inflight).await;
                 }
-                next_pending.push(new_ep);
+                linger_sleep.as_mut().reset(tokio::time::Instant::now() + far_future());
+                linger_active = false;
             }
-            pending = next_pending;
         }
+    }
+}
 
-        Ok(all_successes)
+fn far_future() -> Duration {
+    Duration::from_secs(86400)
+}
+
+// ---------------------------------------------------------------------------
+// Write path
+// ---------------------------------------------------------------------------
+
+fn prepare_batch(
+    state: &mut LoopState,
+    events: Vec<UserEvent>,
+) -> (Vec<RecordEventsRequestItem>, Vec<i64>) {
+    let mut items = Vec::with_capacity(events.len());
+    let mut offsets = Vec::with_capacity(events.len());
+
+    for event in events {
+        let offset = state.lrs + 1;
+        state.lrs = offset;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
+        let proto_event = chronicle_proto::pb_ext::Event {
+            timeline_id: state.timeline_id,
+            term: state.term,
+            offset,
+            payload: Some(event.payload.into()),
+            crc32: None,
+            timestamp: now,
+            schema_id: 0,
+        };
+
+        let item = RecordEventsRequestItem {
+            event: Some(proto_event),
+            trunc: state.needs_trunc,
+            lra: state.lra,
+        };
+        state.needs_trunc = false;
+
+        items.push(item);
+        offsets.push(offset);
     }
 
-    /// Fence all ensemble members concurrently. Returns (ensemble, max_lra).
-    async fn fence_ensemble(
-        &self,
-        mut ensemble: Vec<String>,
-        timeline_id: i64,
-        term: i64,
-    ) -> Result<(Vec<String>, i64), ChronicleError> {
-        let pool = self.inner.pool.clone();
-        let results = self
-            .broadcast_with_replace(
-                &mut ensemble,
-                |ep| {
-                    let pool = pool.clone();
-                    async move {
-                        let conn = pool.get_or_connect(&ep)?;
-                        let lra = fence_unit(&conn, &ep, timeline_id, term).await?;
-                        let handle = conn.open_record_handle().await?;
-                        Ok((lra, handle))
-                    }
-                },
-                FENCE_TIMEOUT,
-            )
-            .await?;
+    (items, offsets)
+}
 
-        let mut max_lra: i64 = 0;
-        for (ep, (lra, handle)) in results {
-            if lra > max_lra {
-                max_lra = lra;
-            }
-            self.inner.handles.lock().unwrap().insert(ep, handle);
-        }
-
-        Ok((ensemble, max_lra))
+async fn flush_batch(
+    state: &mut LoopState,
+    batch: &mut Vec<PendingEvent>,
+    inflight: &mut VecDeque<InflightBatch>,
+) {
+    let mut events = Vec::with_capacity(batch.len());
+    let mut txs = Vec::with_capacity(batch.len());
+    for p in batch.drain(..) {
+        events.push(p.event);
+        txs.push(p.tx);
     }
 
-    /// Update segment in catalog when a unit is replaced.
-    /// Empty segment → replace ensemble in-place.
-    /// Non-empty → create new segment.
-    async fn update_segment(
-        &self,
-        old_endpoint: &str,
-        new_endpoint: &str,
-    ) -> Result<(), ChronicleError> {
-        let lra = self.inner.state.lock().unwrap().lra;
-        let catalog = &self.inner.catalog;
-        let name = &self.inner.timeline_name;
+    let (items, offsets) = prepare_batch(state, events);
+    let max_offset = *offsets.last().unwrap();
+    let request = RecordEventsRequest { items };
 
-        let catalog_segments = catalog.list_segments(name).await?;
-        if let Some(last) = catalog_segments.last() {
-            let mut new_ensemble = last.value.ensemble.clone();
-            if let Some(pos) = new_ensemble.iter().position(|e| e == old_endpoint) {
-                new_ensemble[pos] = new_endpoint.to_string();
-            }
+    // Fire to all unit streams (non-blocking).
+    for (ep, stream) in &state.streams {
+        if let Err(e) = stream.send(request.clone()).await {
+            warn!(endpoint = %ep, error = %e, "flush_batch: failed to send");
+        }
+    }
 
-            if last.value.start_offset > lra {
-                let updated = Segment {
-                    ensemble: new_ensemble,
-                    start_offset: last.value.start_offset,
-                };
-                catalog
-                    .put_segment(name, &updated, last.version)
-                    .await?;
+    let callbacks: Vec<_> = offsets.into_iter().zip(txs).collect();
+    inflight.push_back(InflightBatch {
+        max_offset,
+        callbacks,
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Ack processing — watermark-based resolution
+// ---------------------------------------------------------------------------
+
+fn process_ack(
+    state: &mut LoopState,
+    inflight: &mut VecDeque<InflightBatch>,
+    ack: UnitAck,
+) {
+    match ack.result {
+        Ok(resp) => {
+            if resp.code == StatusCode::Ok as i32 {
+                state
+                    .unit_synced
+                    .insert(ack.endpoint, resp.synced_offset);
+                drain_resolved(state, inflight);
+            } else if resp.code == StatusCode::Fenced as i32 {
+                fail_all_inflight(
+                    inflight,
+                    ChronicleError::Fenced {
+                        timeline_id: resp.timeline_id,
+                        term: resp.term,
+                    },
+                );
             } else {
-                let new_seg = Segment {
-                    ensemble: new_ensemble,
-                    start_offset: lra + 1,
-                };
-                catalog.put_segment(name, &new_seg, -1).await?;
+                fail_all_inflight(
+                    inflight,
+                    ChronicleError::InvalidTerm {
+                        current: resp.term,
+                        requested: state.term,
+                    },
+                );
             }
         }
+        Err(e) => {
+            warn!(endpoint = %ack.endpoint, error = %e, "unit stream error");
+            fail_all_inflight(inflight, e);
+        }
+    }
+}
 
-        Ok(())
+fn drain_resolved(
+    state: &mut LoopState,
+    inflight: &mut VecDeque<InflightBatch>,
+) {
+    let global_synced = state.unit_synced.values().copied().min().unwrap_or(-1);
+
+    while let Some(front) = inflight.front() {
+        if front.max_offset <= global_synced {
+            let batch = inflight.pop_front().unwrap();
+            for (offset, tx) in batch.callbacks {
+                let _ = tx.send(Ok(Offset(offset)));
+            }
+            state.lra = batch.max_offset;
+        } else {
+            break;
+        }
+    }
+}
+
+fn fail_all_inflight(
+    inflight: &mut VecDeque<InflightBatch>,
+    error: ChronicleError,
+) {
+    let msg = error.to_string();
+    for batch in inflight.drain(..) {
+        for (_, tx) in batch.callbacks {
+            let _ = tx.send(Err(ChronicleError::Internal(msg.clone())));
+        }
+    }
+}
+
+/// After event channel closes, keep processing acks until inflight is empty.
+async fn drain_remaining(
+    state: &mut LoopState,
+    inflight: &mut VecDeque<InflightBatch>,
+    ack_rx: &mut mpsc::Receiver<UnitAck>,
+) {
+    while !inflight.is_empty() {
+        match ack_rx.recv().await {
+            Some(ack) => process_ack(state, inflight, ack),
+            None => {
+                fail_all_inflight(
+                    inflight,
+                    ChronicleError::Internal("ack channel closed".into()),
+                );
+                break;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Ensemble setup — fencing + stream opening
+// ---------------------------------------------------------------------------
+
+/// Fence all ensemble members and open record streams.
+/// Returns (ensemble, max_lra, streams).
+async fn fence_ensemble(
+    pool: &Arc<ConnPool>,
+    ack_tx: &mpsc::Sender<UnitAck>,
+    ensemble: Vec<String>,
+    timeline_id: i64,
+    term: i64,
+) -> Result<(Vec<String>, i64, HashMap<String, RecordStream>), ChronicleError> {
+    let futs = ensemble.iter().map(|ep| {
+        let ep = ep.clone();
+        let pool = pool.clone();
+        let ack_tx = ack_tx.clone();
+        async move {
+            let conn = pool.get_or_connect(&ep)?;
+            let lra = fence_unit(&conn, &ep, timeline_id, term).await?;
+            let stream = conn.open_record_stream(ack_tx).await?;
+            Ok::<_, ChronicleError>((ep, lra, stream))
+        }
+    });
+
+    let results = join_all(futs).await;
+
+    let mut max_lra: i64 = 0;
+    let mut streams = HashMap::new();
+    let mut final_ensemble = Vec::new();
+    for result in results {
+        let (ep, lra, stream) = result?;
+        if lra > max_lra {
+            max_lra = lra;
+        }
+        streams.insert(ep.clone(), stream);
+        final_ensemble.push(ep);
     }
 
-    // -- Lifecycle -----------------------------------------------------------
+    Ok((final_ensemble, max_lra, streams))
+}
 
-    pub async fn close(&self) {
-        self.inner.handles.lock().unwrap().clear();
+async fn update_segment(
+    state: &LoopState,
+    old_endpoint: &str,
+    new_endpoint: &str,
+) -> Result<(), ChronicleError> {
+    let catalog = &state.catalog;
+    let name = &state.timeline_name;
+
+    let catalog_segments = catalog.list_segments(name).await?;
+    if let Some(last) = catalog_segments.last() {
+        let mut new_ensemble = last.value.ensemble.clone();
+        if let Some(pos) = new_ensemble.iter().position(|e| e == old_endpoint) {
+            new_ensemble[pos] = new_endpoint.to_string();
+        }
+
+        if last.value.start_offset > state.lra {
+            let updated = Segment {
+                ensemble: new_ensemble,
+                start_offset: last.value.start_offset,
+            };
+            catalog
+                .put_segment(name, &updated, last.version)
+                .await?;
+        } else {
+            let new_seg = Segment {
+                ensemble: new_ensemble,
+                start_offset: state.lra + 1,
+            };
+            catalog.put_segment(name, &new_seg, -1).await?;
+        }
     }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

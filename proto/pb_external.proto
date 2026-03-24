@@ -59,18 +59,17 @@ message RecordEventsRequest {
   repeated RecordEventsRequestItem items = 1;
 }
 
-message RecordEventsResponse {
-  repeated RecordEventsResponseItem items = 1;
-}
 message RecordEventsRequestItem {
   Event event = 1;
   bool trunc = 2;
   int64 lra = 3;
 }
 
-message RecordEventsResponseItem {
+message RecordEventsResponse {
   StatusCode code = 1;
-  Event event = 2;
+  int64 synced_offset = 2;
+  int64 timeline_id = 3;
+  int64 term = 4;
 }
 
 service Chronicle {
