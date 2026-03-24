@@ -1,4 +1,4 @@
-use crate::conn::{Conn, ConnPool, RecordStream, UnitAck};
+use crate::conn::{Conn, ConnPool, RecordStream, Watermark};
 use crate::ensemble::select_ensemble;
 use crate::error::ChronicleError;
 use crate::Event as UserEvent;
@@ -32,7 +32,7 @@ struct LoopState {
     timeline_name: String,
     streams: HashMap<String, RecordStream>,
     unit_synced: HashMap<String, i64>,
-    ack_tx: mpsc::Sender<UnitAck>,
+    wm_tx: mpsc::Sender<Watermark>,
 }
 
 struct InflightBatch {
@@ -98,12 +98,12 @@ impl StateMachine {
             "new term: fencing ensemble"
         );
 
-        // Create the shared ack channel.
-        let (ack_tx, ack_rx) = mpsc::channel::<UnitAck>(256);
+        // Create the shared watermark channel.
+        let (wm_tx, wm_rx) = mpsc::channel::<Watermark>(256);
 
         // Fence ensemble and open record streams.
         let (ensemble, lra, streams) =
-            fence_ensemble(&pool, &ack_tx, ensemble, tc.timeline_id, tc.term).await?;
+            fence_ensemble(&pool, &wm_tx, ensemble, tc.timeline_id, tc.term).await?;
 
         let needs_trunc = lra > 0;
 
@@ -146,11 +146,11 @@ impl StateMachine {
             timeline_name: name.to_string(),
             streams,
             unit_synced,
-            ack_tx,
+            wm_tx,
         };
 
         let (event_tx, event_rx) = mpsc::channel::<PendingEvent>(max_batch_size * 2);
-        let loop_task = tokio::spawn(event_loop(state, event_rx, ack_rx, max_batch_size, linger));
+        let loop_task = tokio::spawn(event_loop(state, event_rx, wm_rx, max_batch_size, linger));
 
         Ok(Self {
             event_tx: Some(event_tx),
@@ -174,7 +174,7 @@ impl StateMachine {
             .await
             .map_err(|_| ChronicleError::Internal("timeline closed".into()))?;
         rx.await
-            .map_err(|_| ChronicleError::Internal("ack channel dropped".into()))?
+            .map_err(|_| ChronicleError::Internal("watermark channel dropped".into()))?
     }
 
     pub async fn close(&mut self) {
@@ -193,7 +193,7 @@ impl StateMachine {
 async fn event_loop(
     mut state: LoopState,
     mut event_rx: mpsc::Receiver<PendingEvent>,
-    mut ack_rx: mpsc::Receiver<UnitAck>,
+    mut wm_rx: mpsc::Receiver<Watermark>,
     max_batch_size: usize,
     linger: Duration,
 ) {
@@ -205,13 +205,13 @@ async fn event_loop(
 
     loop {
         tokio::select! {
-            // Prioritize ack processing to keep watermarks advancing.
+            // Prioritize watermark processing to keep the global watermark advancing.
             biased;
 
-            ack = ack_rx.recv() => {
-                match ack {
-                    Some(unit_ack) => {
-                        process_ack(&mut state, &mut inflight, unit_ack);
+            wm = wm_rx.recv() => {
+                match wm {
+                    Some(wm) => {
+                        process_watermark(&mut state, &mut inflight, wm);
                     }
                     None => break,
                 }
@@ -238,7 +238,7 @@ async fn event_loop(
                         if !batch.is_empty() {
                             flush_batch(&mut state, &mut batch, &mut inflight).await;
                         }
-                        drain_remaining(&mut state, &mut inflight, &mut ack_rx).await;
+                        drain_remaining(&mut state, &mut inflight, &mut wm_rx).await;
                         return;
                     }
                 }
@@ -334,20 +334,20 @@ async fn flush_batch(
 }
 
 // ---------------------------------------------------------------------------
-// Ack processing — watermark-based resolution
+// Watermark processing — resolution by global minimum
 // ---------------------------------------------------------------------------
 
-fn process_ack(
+fn process_watermark(
     state: &mut LoopState,
     inflight: &mut VecDeque<InflightBatch>,
-    ack: UnitAck,
+    wm: Watermark,
 ) {
-    match ack.result {
+    match wm.result {
         Ok(resp) => {
             if resp.code == StatusCode::Ok as i32 {
                 state
                     .unit_synced
-                    .insert(ack.endpoint, resp.synced_offset);
+                    .insert(wm.endpoint, resp.synced_offset);
                 drain_resolved(state, inflight);
             } else if resp.code == StatusCode::Fenced as i32 {
                 fail_all_inflight(
@@ -368,7 +368,7 @@ fn process_ack(
             }
         }
         Err(e) => {
-            warn!(endpoint = %ack.endpoint, error = %e, "unit stream error");
+            warn!(endpoint = %wm.endpoint, error = %e, "unit stream error");
             fail_all_inflight(inflight, e);
         }
     }
@@ -405,19 +405,19 @@ fn fail_all_inflight(
     }
 }
 
-/// After event channel closes, keep processing acks until inflight is empty.
+/// After event channel closes, keep processing watermarks until inflight is empty.
 async fn drain_remaining(
     state: &mut LoopState,
     inflight: &mut VecDeque<InflightBatch>,
-    ack_rx: &mut mpsc::Receiver<UnitAck>,
+    wm_rx: &mut mpsc::Receiver<Watermark>,
 ) {
     while !inflight.is_empty() {
-        match ack_rx.recv().await {
-            Some(ack) => process_ack(state, inflight, ack),
+        match wm_rx.recv().await {
+            Some(wm) => process_watermark(state, inflight, wm),
             None => {
                 fail_all_inflight(
                     inflight,
-                    ChronicleError::Internal("ack channel closed".into()),
+                    ChronicleError::Internal("watermark channel closed".into()),
                 );
                 break;
             }
@@ -433,7 +433,7 @@ async fn drain_remaining(
 /// Returns (ensemble, max_lra, streams).
 async fn fence_ensemble(
     pool: &Arc<ConnPool>,
-    ack_tx: &mpsc::Sender<UnitAck>,
+    wm_tx: &mpsc::Sender<Watermark>,
     ensemble: Vec<String>,
     timeline_id: i64,
     term: i64,
@@ -441,11 +441,11 @@ async fn fence_ensemble(
     let futs = ensemble.iter().map(|ep| {
         let ep = ep.clone();
         let pool = pool.clone();
-        let ack_tx = ack_tx.clone();
+        let wm_tx = wm_tx.clone();
         async move {
             let conn = pool.get_or_connect(&ep)?;
             let lra = fence_unit(&conn, &ep, timeline_id, term).await?;
-            let stream = conn.open_record_stream(ack_tx).await?;
+            let stream = conn.open_record_stream(wm_tx).await?;
             Ok::<_, ChronicleError>((ep, lra, stream))
         }
     });

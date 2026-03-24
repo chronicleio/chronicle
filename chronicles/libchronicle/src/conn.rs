@@ -81,11 +81,11 @@ impl Conn {
         Ok(response.into_inner())
     }
 
-    /// Open a fire-and-forget record stream. Responses are forwarded to `ack_tx`
+    /// Open a fire-and-forget record stream. Responses are forwarded to `wm_tx`
     /// by a background reader task.
     pub async fn open_record_stream(
         &self,
-        ack_tx: mpsc::Sender<UnitAck>,
+        wm_tx: mpsc::Sender<Watermark>,
     ) -> Result<RecordStream, ChronicleError> {
         let mut client = self.client.clone();
         let (stream_tx, stream_rx) = mpsc::channel::<RecordEventsRequest>(64);
@@ -97,7 +97,7 @@ impl Conn {
         let response_stream = response.into_inner();
 
         let ep = self.endpoint.clone();
-        tokio::spawn(response_reader(ep, response_stream, ack_tx));
+        tokio::spawn(response_reader(ep, response_stream, wm_tx));
 
         Ok(RecordStream { tx: stream_tx })
     }
@@ -132,7 +132,7 @@ pub struct RecordStream {
 }
 
 impl RecordStream {
-    /// Send a batch into the stream without waiting for ack.
+    /// Send a batch into the stream without waiting for watermark.
     pub async fn send(&self, request: RecordEventsRequest) -> Result<(), ChronicleError> {
         self.tx
             .send(request)
@@ -142,26 +142,26 @@ impl RecordStream {
 }
 
 // ---------------------------------------------------------------------------
-// UnitAck — a watermark ack received from a unit
+// Watermark — a write-ack received from a unit, carrying its synced offset
 // ---------------------------------------------------------------------------
 
-pub struct UnitAck {
+pub struct Watermark {
     pub endpoint: String,
     pub result: Result<RecordEventsResponse, ChronicleError>,
 }
 
-/// Background task: reads watermark ack responses from a unit's gRPC stream
-/// and forwards them to the shared ack channel.
+/// Background task: reads watermark responses from a unit's gRPC stream
+/// and forwards them to the shared watermark channel.
 async fn response_reader(
     endpoint: String,
     mut stream: tonic::Streaming<RecordEventsResponse>,
-    ack_tx: mpsc::Sender<UnitAck>,
+    wm_tx: mpsc::Sender<Watermark>,
 ) {
     loop {
         match stream.message().await {
             Ok(Some(resp)) => {
-                if ack_tx
-                    .send(UnitAck {
+                if wm_tx
+                    .send(Watermark {
                         endpoint: endpoint.clone(),
                         result: Ok(resp),
                     })
@@ -172,8 +172,8 @@ async fn response_reader(
                 }
             }
             Ok(None) => {
-                let _ = ack_tx
-                    .send(UnitAck {
+                let _ = wm_tx
+                    .send(Watermark {
                         endpoint: endpoint.clone(),
                         result: Err(ChronicleError::Transport("stream ended".into())),
                     })
@@ -181,8 +181,8 @@ async fn response_reader(
                 break;
             }
             Err(e) => {
-                let _ = ack_tx
-                    .send(UnitAck {
+                let _ = wm_tx
+                    .send(Watermark {
                         endpoint: endpoint.clone(),
                         result: Err(ChronicleError::Transport(e.to_string())),
                     })
