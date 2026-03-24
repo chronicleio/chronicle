@@ -1,6 +1,5 @@
-use futures_util::TryStreamExt;
 use libchronicle::chronicle::{Chronicle, ChronicleOptions};
-use libchronicle::{Event, FetchOptions, TimelineOptions, Writer};
+use libchronicle::{Event, TimelineOptions, Writer};
 use std::sync::Arc;
 
 #[tokio::main]
@@ -20,7 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let o2 = timeline.record(Event::new(b"world".to_vec())).await?;
     println!("recorded at offsets: {}, {}", o1.0, o2.0);
 
-    // Record with key and schema
+    // Record with key
     let o3 = timeline
         .record(
             Event::new(b"keyed event".to_vec())
@@ -40,17 +39,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         r1?.0, r2?.0, r3?.0
     );
 
-    // Fetch from beginning
-    let mut stream = timeline.fetch(FetchOptions::earliest().limit(6));
-    while let Some(event) = stream.try_next().await? {
-        println!(
-            "offset={} payload={}",
-            event.offset.unwrap_or(-1),
-            String::from_utf8_lossy(&event.payload)
-        );
-    }
+    // TODO: fetch will be reimplemented with catalog-based reader
 
-    // Close gracefully
     timeline.close().await;
 
     Ok(())

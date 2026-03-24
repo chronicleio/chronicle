@@ -18,8 +18,8 @@ pub enum ChronicleError {
     #[error("Reconciliation failed: {0}")]
     ReconciliationFailed(String),
 
-    #[error("Ensemble unavailable: {0}")]
-    EnsembleUnavailable(String),
+    #[error("Unit not enough: {0}")]
+    UnitNotEnough(String),
 
     #[error("Catalog error: {0}")]
     Catalog(#[from] CatalogError),

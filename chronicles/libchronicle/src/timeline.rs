@@ -1,9 +1,8 @@
 use crate::conn::ConnPool;
-use crate::cursor::EventStream;
 use crate::error::ChronicleError;
 use crate::state_machine::StateMachine;
 use crate::write_group::WriteGroup;
-use crate::{Event as UserEvent, FetchOptions, Offset, StartPosition, TimelineOptions, Writer};
+use crate::{Event as UserEvent, Offset, TimelineOptions, Writer};
 use catalog::Catalog;
 use std::sync::Arc;
 use tracing::info;
@@ -12,6 +11,9 @@ pub struct Timeline {
     state_machine: StateMachine,
     #[allow(dead_code)]
     options: TimelineOptions,
+    #[allow(dead_code)]
+    catalog: Arc<Catalog>,
+    #[allow(dead_code)]
     pool: Arc<ConnPool>,
     write_group: WriteGroup,
 }
@@ -24,8 +26,8 @@ impl Timeline {
         options: TimelineOptions,
     ) -> Result<Self, ChronicleError> {
         let state_machine = StateMachine::open(
-            &catalog,
-            &pool,
+            catalog.clone(),
+            pool.clone(),
             name,
             options.replication_factor,
             options.schema_id.clone(),
@@ -33,7 +35,7 @@ impl Timeline {
         .await?;
 
         let write_group = WriteGroup::start(
-            state_machine.shared(),
+            state_machine.clone(),
             options.max_batch_size,
             options.linger,
         );
@@ -41,49 +43,14 @@ impl Timeline {
         Ok(Self {
             state_machine,
             options,
+            catalog,
             pool,
             write_group,
         })
     }
 
-    pub fn fetch(&self, opts: FetchOptions) -> EventStream {
-        let start_offset = match opts.start {
-            StartPosition::Earliest => 1,
-            StartPosition::Latest => self.state_machine.lra() + 1,
-            StartPosition::Offset(o) => o,
-            StartPosition::Index { .. } => 1,
-        };
-
-        let mut conns = std::collections::HashMap::new();
-        for seg in &self.state_machine.segments {
-            for ep in &seg.ensemble {
-                if !conns.contains_key(ep) {
-                    if let Ok(conn) = self.pool.get_or_connect(ep) {
-                        conns.insert(ep.clone(), conn);
-                    }
-                }
-            }
-        }
-
-        let mut stream = EventStream::new(
-            self.state_machine.timeline_id(),
-            self.state_machine.segments.clone(),
-            &conns,
-            start_offset,
-        );
-
-        if let Some(limit) = opts.limit {
-            stream = stream.with_limit(limit);
-        }
-        if let Some(timeout) = opts.timeout {
-            stream = stream.with_timeout(timeout);
-        }
-        if opts.limit.is_none() && opts.timeout.is_none() {
-            stream = stream.with_tail();
-        }
-
-        stream
-    }
+    // TODO: fetch() will query catalog for segments dynamically.
+    // Reader implementation is a follow-up.
 
     pub async fn close(&self) {
         self.write_group.close().await;

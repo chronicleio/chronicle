@@ -1,8 +1,7 @@
 use crate::error::ChronicleError;
-use crate::state_machine::SharedState;
+use crate::state_machine::StateMachine;
 use crate::{Event as UserEvent, Offset};
-use chronicle_proto::pb_ext::{RecordEventsRequest, RecordEventsRequestItem};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tracing::warn;
@@ -12,7 +11,7 @@ struct PendingEvent {
     tx: oneshot::Sender<Result<Offset, ChronicleError>>,
 }
 
-/// A write shard — owns a batch loop that feeds into the shared state machine.
+/// A write shard — owns a batch loop that feeds into the state machine.
 pub(crate) struct WriteGroup {
     event_tx: Mutex<Option<mpsc::Sender<PendingEvent>>>,
     group_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -20,17 +19,14 @@ pub(crate) struct WriteGroup {
 
 impl WriteGroup {
     pub fn start(
-        shared: Arc<Mutex<SharedState>>,
+        sm: StateMachine,
         max_batch_size: usize,
         linger: Duration,
     ) -> Self {
-        let timeline_id = shared.lock().unwrap().timeline_id;
-
         let (event_tx, event_rx) = mpsc::channel::<PendingEvent>(max_batch_size * 2);
 
-        let shared_clone = shared.clone();
         let group_task = tokio::spawn(async move {
-            batch_loop(timeline_id, shared_clone, event_rx, max_batch_size, linger).await;
+            batch_loop(sm, event_rx, max_batch_size, linger).await;
         });
 
         Self {
@@ -68,8 +64,7 @@ impl WriteGroup {
 // --- batching loop ---
 
 async fn batch_loop(
-    timeline_id: i64,
-    shared: Arc<Mutex<SharedState>>,
+    sm: StateMachine,
     mut event_rx: mpsc::Receiver<PendingEvent>,
     max_batch_size: usize,
     linger: Duration,
@@ -109,83 +104,28 @@ async fn batch_loop(
             continue;
         }
 
-        let events: Vec<_> = batch
-            .drain(..)
-            .map(|p| (p.event, p.tx))
-            .collect();
+        let mut events = Vec::with_capacity(batch.len());
+        let mut txs = Vec::with_capacity(batch.len());
+        for p in batch.drain(..) {
+            events.push(p.event);
+            txs.push(p.tx);
+        }
 
-        let items = prepare_batch(&shared, timeline_id, events);
+        let (items, offsets) = sm.prepare_batch(events);
 
-        if let Err(e) = replicate(&shared, items).await {
-            warn!(error = %e, "failed to replicate batch");
+        match sm.apply(items).await {
+            Ok(()) => {
+                for (offset, tx) in offsets.into_iter().zip(txs) {
+                    let _ = tx.send(Ok(Offset(offset)));
+                }
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                warn!(error = %msg, "failed to apply batch");
+                for tx in txs {
+                    let _ = tx.send(Err(ChronicleError::Internal(msg.clone())));
+                }
+            }
         }
     }
-}
-
-// --- prepare + replicate ---
-
-fn prepare_batch(
-    shared: &Arc<Mutex<SharedState>>,
-    timeline_id: i64,
-    events: Vec<(UserEvent, oneshot::Sender<Result<Offset, ChronicleError>>)>,
-) -> Vec<RecordEventsRequestItem> {
-    let mut s = shared.lock().unwrap();
-    let mut items = Vec::with_capacity(events.len());
-
-    for (event, tx) in events {
-        let offset = s.lrs + 1;
-        s.lrs = offset;
-
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
-
-        let proto_event = chronicle_proto::pb_ext::Event {
-            timeline_id,
-            term: s.term,
-            offset,
-            payload: Some(event.payload.into()),
-            crc32: None,
-            timestamp: now,
-            schema_id: 0,
-        };
-
-        let item = RecordEventsRequestItem {
-            event: Some(proto_event),
-            trunc: s.needs_trunc,
-            lra: s.lra,
-        };
-        s.needs_trunc = false;
-
-        s.acked.insert(offset, std::collections::HashSet::new());
-        s.waiters.insert(offset, tx);
-
-        items.push(item);
-    }
-
-    items
-}
-
-async fn replicate(
-    shared: &Arc<Mutex<SharedState>>,
-    items: Vec<RecordEventsRequestItem>,
-) -> Result<(), ChronicleError> {
-    let senders = {
-        let s = shared.lock().unwrap();
-        s.senders.values().cloned().collect::<Vec<_>>()
-    };
-
-    if senders.is_empty() {
-        return Err(ChronicleError::EnsembleUnavailable("no connected units".into()));
-    }
-
-    let request = RecordEventsRequest { items };
-    for sender in &senders {
-        if let Err(e) = sender.send(request.clone()).await {
-            warn!(error = %e, "failed to send batch to unit");
-        }
-    }
-
-    Ok(())
 }

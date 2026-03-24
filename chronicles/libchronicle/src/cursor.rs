@@ -91,7 +91,7 @@ impl EventStream {
                 return Ok(conn);
             }
         }
-        Err(ChronicleError::EnsembleUnavailable(
+        Err(ChronicleError::UnitNotEnough(
             "no reachable unit in segment ensemble".into(),
         ))
     }

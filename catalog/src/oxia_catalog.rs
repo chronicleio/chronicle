@@ -1,4 +1,4 @@
-use chronicle_proto::pb_catalog::{Segment, TimelineMeta, UnitRegistration};
+use chronicle_proto::pb_catalog::{Segment, TimelineMeta, UnitRegistration, UnitStatus};
 use liboxia::client::{GetOption, OxiaClient, PutOption};
 use liboxia::client_builder::OxiaClientBuilder;
 use liboxia::errors::OxiaError;
@@ -254,6 +254,81 @@ impl OxiaCatalog {
         Ok(segments.into_iter().last())
     }
 
+    /// Get an existing timeline or create a new one if it doesn't exist.
+    ///
+    /// Uses `ExpectVersionId(-1)` for creation so that concurrent callers
+    /// race safely — the loser sees `AlreadyExists` and falls back to get.
+    pub async fn tl_fetch_or_insert(&self, name: &str) -> Result<TimelineMeta, CatalogError> {
+        match self.get_timeline(name).await {
+            Ok(tc) => Ok(tc),
+            Err(CatalogError::NotFound(_)) => match self.create_timeline(name).await {
+                Ok(tc) => Ok(tc),
+                Err(CatalogError::AlreadyExists(_)) => self.get_timeline(name).await,
+                Err(e) => Err(e),
+            },
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Get the writable (last) segment for a timeline, or create one.
+    ///
+    /// The `ensemble_supplier` is only called when no segment exists — it
+    /// should select the ensemble (e.g. via `select_ensemble`).
+    ///
+    /// Uses `ExpectVersionId(-1)` for creation so concurrent callers race
+    /// safely — the loser sees `VersionConflict` and falls back to get.
+    pub async fn tl_fetch_or_insert_w_seg<F, Fut>(
+        &self,
+        timeline_name: &str,
+        ensemble_supplier: F,
+    ) -> Result<Versioned<Segment>, CatalogError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<Vec<String>, CatalogError>>,
+    {
+        if let Some(last) = self.get_last_segment(timeline_name).await? {
+            return Ok(last);
+        }
+        let ensemble = ensemble_supplier().await?;
+        let segment = Segment {
+            ensemble,
+            start_offset: 1,
+        };
+        match self.put_segment(timeline_name, &segment, -1).await {
+            Ok(vs) => Ok(vs),
+            Err(CatalogError::VersionConflict { .. }) => {
+                self.get_last_segment(timeline_name)
+                    .await?
+                    .ok_or_else(|| CatalogError::Internal(
+                        "segment vanished after conflict".into(),
+                    ))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Get or create a timeline, then atomically bump its term.
+    ///
+    /// Combines `tl_fetch_or_insert` + term increment in a single method
+    /// to avoid a redundant read. Retries on CAS conflict.
+    pub async fn tl_new_term(
+        &self,
+        name: &str,
+    ) -> Result<TimelineMeta, CatalogError> {
+        let mut tc = self.tl_fetch_or_insert(name).await?;
+        loop {
+            let mut updated = tc.clone();
+            updated.term = tc.term + 1;
+            match self.put_timeline(&updated, tc.version).await {
+                Ok(tc) => return Ok(tc),
+                Err(CatalogError::VersionConflict { .. }) => {
+                    tc = self.get_timeline(name).await?;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
     /// Register a unit at /chronicle/units/{zone}/{unit-id}.
     /// Each unit has its own key — no CAS contention between units.
     pub async fn register_unit(
@@ -302,5 +377,14 @@ impl OxiaCatalog {
             }
         }
         Ok(units)
+    }
+
+    /// List only writable units.
+    pub async fn list_writable_units(&self) -> Result<Vec<UnitRegistration>, CatalogError> {
+        let units = self.list_units().await?;
+        Ok(units
+            .into_iter()
+            .filter(|u| u.status() == UnitStatus::Writable)
+            .collect())
     }
 }
