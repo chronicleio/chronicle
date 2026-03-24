@@ -299,7 +299,7 @@ pub async fn run(args: VerifyArgs) -> Result<(), Box<dyn std::error::Error>> {
 
             let mut stream = loop {
                 match chronicle.open_timeline(&name, TimelineOptions::new().replication_factor(args.replication_factor)).await {
-                    Ok(t) => break t.fetch(FetchOptions::earliest()),
+                    Ok(t) => break t.fetch(FetchOptions::earliest()).await.unwrap(),
                     Err(_) => {
                         tokio::time::sleep(Duration::from_secs(1)).await;
                         if !reading.load(Ordering::Relaxed) {

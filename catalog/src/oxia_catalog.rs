@@ -1,5 +1,6 @@
 use chronicle_proto::pb_catalog::{Segment, TimelineMeta, UnitRegistration, UnitStatus};
-use liboxia::client::{GetOption, OxiaClient, PutOption};
+use liboxia::client::{GetOption, GetSequenceUpdatesOption, OxiaClient, PutOption};
+use tokio::sync::mpsc::Receiver;
 use liboxia::client_builder::OxiaClientBuilder;
 use liboxia::errors::OxiaError;
 use prost::Message;
@@ -189,8 +190,8 @@ impl OxiaCatalog {
 
         let mut timelines = Vec::with_capacity(result.records.len());
         for record in &result.records {
-            // Skip segment keys (contain /seg/)
-            if record.key.contains("/seg/") {
+            // Skip segment keys (contain /seg-)
+            if record.key.contains("/seg-") {
                 continue;
             }
             if let Some(ref value) = record.value {
@@ -386,5 +387,25 @@ impl OxiaCatalog {
             .into_iter()
             .filter(|u| u.status() == UnitStatus::Writable)
             .collect())
+    }
+
+    /// Subscribe to segment key updates for a timeline.
+    ///
+    /// Uses Oxia sequence key subscription to receive the highest segment key
+    /// each time a new segment is written. The receiver yields the full key
+    /// string (e.g. `/chronicle/timelines/{name}/seg-0000000000000000001`).
+    pub async fn subscribe_segments(
+        &self,
+        timeline_name: &str,
+    ) -> Result<Receiver<String>, CatalogError> {
+        let key = crate::segment_key_prefix(timeline_name);
+        let partition_key = timeline_name.to_string();
+        self.client
+            .get_sequence_updates_with_options(
+                key,
+                vec![GetSequenceUpdatesOption::PartitionKey(partition_key)],
+            )
+            .await
+            .map_err(CatalogError::from)
     }
 }

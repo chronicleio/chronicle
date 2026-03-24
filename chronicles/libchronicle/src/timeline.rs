@@ -43,9 +43,28 @@ impl Timeline {
         })
     }
 
-    // TODO: implement fetch with segment-based reads
-    pub fn fetch(&self, _options: FetchOptions) -> EventStream {
-        unimplemented!("fetch not yet implemented")
+    pub async fn open_readonly(
+        catalog: Arc<Catalog>,
+        pool: Arc<ConnPool>,
+        name: &str,
+    ) -> Result<Self, ChronicleError> {
+        let state_machine = StateMachine::open_readonly(
+            catalog.clone(),
+            pool.clone(),
+            name,
+        )
+        .await?;
+
+        Ok(Self {
+            state_machine,
+            options: TimelineOptions::default(),
+            catalog,
+            pool,
+        })
+    }
+
+    pub async fn fetch(&self, options: FetchOptions) -> Result<EventStream, ChronicleError> {
+        self.state_machine.fetch(options).await
     }
 
     pub async fn close(&mut self) {

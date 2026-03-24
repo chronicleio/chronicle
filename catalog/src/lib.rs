@@ -19,18 +19,18 @@ impl<T> Versioned<T> {
     }
 }
 
-pub const SEGMENT_KEY_PAD: usize = 20;
+pub const SEGMENT_KEY_PAD: usize = 19;
 
 pub fn segment_key(name: &str, start_offset: i64) -> String {
-    format!("/chronicle/timelines/{}/seg/{:0>width$}", name, start_offset, width = SEGMENT_KEY_PAD)
+    format!("/chronicle/timelines/{}/seg-{:0>width$}", name, start_offset, width = SEGMENT_KEY_PAD)
 }
 
 pub fn segment_key_prefix(name: &str) -> String {
-    format!("/chronicle/timelines/{}/seg/", name)
+    format!("/chronicle/timelines/{}/seg-", name)
 }
 
 pub fn segment_key_max(name: &str) -> String {
-    format!("/chronicle/timelines/{}/seg/{}", name, "9".repeat(SEGMENT_KEY_PAD))
+    format!("/chronicle/timelines/{}/seg-{}", name, "9".repeat(SEGMENT_KEY_PAD))
 }
 
 pub type Catalog = OxiaCatalog;

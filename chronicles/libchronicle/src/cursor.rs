@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
+use tokio::sync::RwLock;
 use tracing::warn;
 
 type InnerStream = Pin<Box<dyn Stream<Item = Result<Event, ChronicleError>> + Send>>;
@@ -20,6 +21,9 @@ const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 pub struct EventStream {
     timeline_id: i64,
     segments: Vec<Segment>,
+    /// Shared segment list updated by the segment subscription watcher.
+    /// Used to refresh segments in tail mode.
+    shared_segments: Arc<RwLock<Vec<Segment>>>,
     conns: HashMap<String, Conn>,
     position: Arc<AtomicI64>,
     inner: Option<InnerStream>,
@@ -31,6 +35,8 @@ pub struct EventStream {
     poll_interval: Duration,
     current_backoff: Duration,
     retries: usize,
+    /// When true, we need to refresh segments before reopening inner stream.
+    needs_segment_refresh: bool,
 }
 
 impl EventStream {
@@ -39,10 +45,12 @@ impl EventStream {
         segments: Vec<Segment>,
         conns: &HashMap<String, Conn>,
         start_offset: i64,
+        shared_segments: Arc<RwLock<Vec<Segment>>>,
     ) -> Self {
         Self {
             timeline_id,
             segments,
+            shared_segments,
             conns: conns.clone(),
             position: Arc::new(AtomicI64::new(start_offset)),
             inner: None,
@@ -54,6 +62,7 @@ impl EventStream {
             poll_interval: DEFAULT_POLL_INTERVAL,
             current_backoff: DEFAULT_POLL_INTERVAL,
             retries: 0,
+            needs_segment_refresh: false,
         }
     }
 
@@ -175,6 +184,19 @@ impl Stream for EventStream {
                 return Poll::Ready(None);
             }
 
+            // Refresh segments from the shared list if needed (tail mode).
+            if self.needs_segment_refresh {
+                let shared = self.shared_segments.clone();
+                let mut fut = Box::pin(async move { shared.read().await.clone() });
+                match fut.as_mut().poll(cx) {
+                    Poll::Ready(new_segments) => {
+                        self.segments = new_segments;
+                        self.needs_segment_refresh = false;
+                    }
+                    Poll::Pending => return Poll::Pending,
+                }
+            }
+
             if self.inner.is_none() {
                 let timeline_id = self.timeline_id;
                 let segments = self.segments.clone();
@@ -217,6 +239,7 @@ impl Stream for EventStream {
                 Poll::Ready(None) => {
                     if self.tail {
                         self.inner = None;
+                        self.needs_segment_refresh = true;
                         cx.waker().wake_by_ref();
                         return Poll::Pending;
                     }

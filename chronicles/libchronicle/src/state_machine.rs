@@ -1,7 +1,8 @@
 use crate::conn::{Conn, ConnPool, RecordStream, Watermark};
+use crate::cursor::EventStream;
 use crate::ensemble::select_ensemble;
 use crate::error::ChronicleError;
-use crate::Event as UserEvent;
+use crate::{Event as UserEvent, FetchOptions, StartPosition};
 use crate::Offset;
 use catalog::Catalog;
 use chronicle_proto::pb_catalog::Segment;
@@ -12,13 +13,28 @@ use futures_util::future::join_all;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, RwLock};
 use tracing::{info, warn};
 
 const MAX_FENCE_ATTEMPTS: u64 = 5;
 
 // ---------------------------------------------------------------------------
-// Event loop state — owned by the spawned task, no mutexes needed
+// Mode
+// ---------------------------------------------------------------------------
+
+enum Mode {
+    ReadWrite {
+        event_tx: Option<mpsc::Sender<PendingEvent>>,
+        loop_task: Option<tokio::task::JoinHandle<()>>,
+    },
+    ReadOnly {
+        /// Background task that watches for new segments via Oxia subscription.
+        _seg_watcher: tokio::task::JoinHandle<()>,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// Event loop state — owned by the spawned write task, no mutexes needed
 // ---------------------------------------------------------------------------
 
 struct LoopState {
@@ -46,16 +62,21 @@ struct PendingEvent {
 }
 
 // ---------------------------------------------------------------------------
-// StateMachine — a handle to the single-threaded event loop
+// StateMachine — handles both read-write and read-only timelines
 // ---------------------------------------------------------------------------
 
 pub(crate) struct StateMachine {
-    event_tx: Option<mpsc::Sender<PendingEvent>>,
-    loop_task: Option<tokio::task::JoinHandle<()>>,
+    mode: Mode,
     timeline_id: i64,
+    timeline_name: String,
+    catalog: Arc<Catalog>,
+    pool: Arc<ConnPool>,
+    segments: Arc<RwLock<Vec<Segment>>>,
 }
 
 impl StateMachine {
+    /// Open a read-write state machine: fences the ensemble and spawns the
+    /// write event loop.
     pub async fn open(
         catalog: Arc<Catalog>,
         pool: Arc<ConnPool>,
@@ -134,6 +155,15 @@ impl StateMachine {
             .map(|ep| (ep.clone(), lra))
             .collect();
 
+        // Load initial segments.
+        let initial_segments: Vec<Segment> = catalog
+            .list_segments(name)
+            .await?
+            .into_iter()
+            .map(|vs| vs.value)
+            .collect();
+        let segments = Arc::new(RwLock::new(initial_segments));
+
         // Build loop state and spawn the event loop.
         let state = LoopState {
             timeline_id: tc.timeline_id,
@@ -141,8 +171,8 @@ impl StateMachine {
             lrs: lra,
             lra,
             needs_trunc,
-            catalog,
-            pool,
+            catalog: catalog.clone(),
+            pool: pool.clone(),
             timeline_name: name.to_string(),
             streams,
             unit_synced,
@@ -153,9 +183,83 @@ impl StateMachine {
         let loop_task = tokio::spawn(event_loop(state, event_rx, wm_rx, max_batch_size, linger));
 
         Ok(Self {
-            event_tx: Some(event_tx),
-            loop_task: Some(loop_task),
+            mode: Mode::ReadWrite {
+                event_tx: Some(event_tx),
+                loop_task: Some(loop_task),
+            },
             timeline_id: tc.timeline_id,
+            timeline_name: name.to_string(),
+            catalog,
+            pool,
+            segments,
+        })
+    }
+
+    /// Open a read-only state machine: no fencing, no write loop.
+    /// Subscribes to segment updates via Oxia sequence key subscription.
+    pub async fn open_readonly(
+        catalog: Arc<Catalog>,
+        pool: Arc<ConnPool>,
+        name: &str,
+    ) -> Result<Self, ChronicleError> {
+        let tc = catalog
+            .get_timeline(name)
+            .await
+            .map_err(|e| ChronicleError::Internal(format!("timeline not found: {}", e)))?;
+
+        // Load initial segments.
+        let initial_segments: Vec<Segment> = catalog
+            .list_segments(name)
+            .await?
+            .into_iter()
+            .map(|vs| vs.value)
+            .collect();
+        let segments = Arc::new(RwLock::new(initial_segments));
+
+        // Subscribe to segment updates.
+        let mut seg_rx = catalog
+            .subscribe_segments(name)
+            .await
+            .map_err(|e| ChronicleError::Internal(format!("segment subscription failed: {}", e)))?;
+
+        // Spawn background task that refreshes segments on subscription updates.
+        let seg_ref = segments.clone();
+        let cat_ref = catalog.clone();
+        let tl_name = name.to_string();
+        let seg_watcher = tokio::spawn(async move {
+            while let Some(highest_key) = seg_rx.recv().await {
+                match cat_ref.list_segments(&tl_name).await {
+                    Ok(versioned_segs) => {
+                        let new_segs: Vec<Segment> =
+                            versioned_segs.into_iter().map(|vs| vs.value).collect();
+                        *seg_ref.write().await = new_segs;
+                    }
+                    Err(e) => {
+                        warn!(
+                            key = %highest_key,
+                            error = %e,
+                            "failed to refresh segments"
+                        );
+                    }
+                }
+            }
+        });
+
+        info!(
+            timeline_id = tc.timeline_id,
+            timeline = %name,
+            "opened read-only state machine"
+        );
+
+        Ok(Self {
+            mode: Mode::ReadOnly {
+                _seg_watcher: seg_watcher,
+            },
+            timeline_id: tc.timeline_id,
+            timeline_name: name.to_string(),
+            catalog,
+            pool,
+            segments,
         })
     }
 
@@ -164,10 +268,14 @@ impl StateMachine {
     }
 
     pub async fn record(&self, event: UserEvent) -> Result<Offset, ChronicleError> {
-        let sender = self
-            .event_tx
-            .as_ref()
-            .ok_or_else(|| ChronicleError::Internal("timeline closed".into()))?;
+        let sender = match &self.mode {
+            Mode::ReadWrite { event_tx, .. } => event_tx
+                .as_ref()
+                .ok_or_else(|| ChronicleError::Internal("timeline closed".into()))?,
+            Mode::ReadOnly { .. } => {
+                return Err(ChronicleError::Internal("timeline is read-only".into()));
+            }
+        };
         let (tx, rx) = oneshot::channel();
         sender
             .send(PendingEvent { event, tx })
@@ -177,11 +285,79 @@ impl StateMachine {
             .map_err(|_| ChronicleError::Internal("watermark channel dropped".into()))?
     }
 
+    /// Create an EventStream for reading events from this timeline.
+    pub async fn fetch(&self, options: FetchOptions) -> Result<EventStream, ChronicleError> {
+        let segments = self.segments.read().await;
+
+        // Resolve start offset.
+        let start_offset = match options.start {
+            StartPosition::Earliest => {
+                segments.first().map(|s| s.start_offset).unwrap_or(0)
+            }
+            StartPosition::Latest => {
+                let tc = self.catalog.get_timeline(&self.timeline_name).await
+                    .map_err(|e| ChronicleError::Internal(format!("failed to get timeline: {}", e)))?;
+                tc.lra + 1
+            }
+            StartPosition::Offset(offset) => offset,
+            StartPosition::Index { .. } => {
+                return Err(ChronicleError::Internal(
+                    "index-based fetch not yet implemented".into(),
+                ));
+            }
+        };
+
+        // Build connections to all ensemble members across segments.
+        let mut conns = HashMap::new();
+        for seg in segments.iter() {
+            for ep in &seg.ensemble {
+                if !conns.contains_key(ep) {
+                    let conn = self.pool.get_or_connect(ep)?;
+                    conns.insert(ep.clone(), conn);
+                }
+            }
+        }
+
+        let seg_snapshot = segments.clone();
+        let shared_segments = self.segments.clone();
+        drop(segments);
+
+        let mut stream = EventStream::new(
+            self.timeline_id,
+            seg_snapshot,
+            &conns,
+            start_offset,
+            shared_segments,
+        );
+
+        if let Some(limit) = options.limit {
+            stream = stream.with_limit(limit);
+        }
+        if let Some(timeout) = options.timeout {
+            stream = stream.with_timeout(timeout);
+        }
+        if matches!(options.start, StartPosition::Latest) {
+            stream = stream.with_tail();
+        }
+
+        Ok(stream)
+    }
+
     pub async fn close(&mut self) {
-        // Drop the sender so the event loop sees channel closed and exits.
-        self.event_tx.take();
-        if let Some(task) = self.loop_task.take() {
-            let _ = task.await;
+        match &mut self.mode {
+            Mode::ReadWrite {
+                event_tx,
+                loop_task,
+            } => {
+                // Drop the sender so the event loop sees channel closed and exits.
+                event_tx.take();
+                if let Some(task) = loop_task.take() {
+                    let _ = task.await;
+                }
+            }
+            Mode::ReadOnly { .. } => {
+                // Watcher will be dropped when StateMachine is dropped.
+            }
         }
     }
 }
