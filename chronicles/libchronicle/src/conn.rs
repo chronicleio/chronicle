@@ -142,7 +142,7 @@ impl RecordStream {
 }
 
 // ---------------------------------------------------------------------------
-// UnitAck — a cumulative ack received from a unit
+// UnitAck — a watermark ack received from a unit
 // ---------------------------------------------------------------------------
 
 pub struct UnitAck {
@@ -150,7 +150,7 @@ pub struct UnitAck {
     pub result: Result<RecordEventsResponse, ChronicleError>,
 }
 
-/// Background task: reads cumulative ack responses from a unit's gRPC stream
+/// Background task: reads watermark ack responses from a unit's gRPC stream
 /// and forwards them to the shared ack channel.
 async fn response_reader(
     endpoint: String,

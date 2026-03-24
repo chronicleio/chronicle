@@ -145,7 +145,7 @@ impl Chronicle for UnitService {
 
                         metrics.write_queue_depth.add(-(item_count as i64), &[]);
 
-                        // Phase 3: send one cumulative response.
+                        // Phase 3: send one watermark ack response.
                         let response = RecordEventsResponse {
                             code: error_code.unwrap_or(StatusCode::Ok.into()),
                             synced_offset: max_offset,
