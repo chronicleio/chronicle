@@ -3,7 +3,7 @@ use crate::error::ChronicleError;
 use crate::Event;
 use chronicle_proto::pb_catalog::Segment;
 use chronicle_proto::pb_ext::{ChunkType, FetchEventsRequest};
-use futures_util::Stream;
+use futures_util::{Stream, StreamExt};
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -115,25 +115,20 @@ impl EventStream {
         let segment = Self::segment_for_offset(segments, start)?;
         let conn = Self::pick_conn(conns, segment)?;
 
-        let (tx, mut response_stream) = conn.open_fetch_stream(64).await?;
-
-        tx.send(FetchEventsRequest {
-            timeline_id,
-            start_offset: start,
-            end_offset: i64::MAX,
-        })
-        .await
-        .map_err(|_| ChronicleError::Transport("fetch stream closed".into()))?;
+        // Returns a FetchStream (impl Stream) that auto-unsubscribes on drop.
+        let mut fetch = conn
+            .fetch(FetchEventsRequest {
+                timeline_id,
+                start_offset: start,
+                end_offset: i64::MAX,
+            })
+            .await?;
 
         let position = position.clone();
 
         let stream = async_stream::try_stream! {
-            let _tx = tx;
-            while let Some(response) = response_stream
-                .message()
-                .await
-                .map_err(|e| ChronicleError::Transport(e.to_string()))?
-            {
+            while let Some(result) = fetch.next().await {
+                let response = result?;
                 let is_final = matches!(
                     response.r#type(),
                     ChunkType::Full | ChunkType::Last
@@ -153,6 +148,7 @@ impl EventStream {
                     break;
                 }
             }
+            // FetchStream dropped here — auto-unsubscribes.
         };
 
         Ok(Box::pin(stream))

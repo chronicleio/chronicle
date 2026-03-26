@@ -1,4 +1,5 @@
-use crate::conn::{Conn, ConnPool, RecordStream, Watermark};
+use crate::conn::{Conn, Watermark};
+use crate::conn_pool::ConnPool;
 use crate::cursor::EventStream;
 use crate::ensemble::select_ensemble;
 use crate::error::ChronicleError;
@@ -46,9 +47,8 @@ struct LoopState {
     catalog: Arc<Catalog>,
     pool: Arc<ConnPool>,
     timeline_name: String,
-    streams: HashMap<String, RecordStream>,
+    conns: HashMap<String, Conn>,
     unit_synced: HashMap<String, i64>,
-    wm_tx: mpsc::Sender<Watermark>,
 }
 
 struct InflightBatch {
@@ -71,6 +71,7 @@ pub(crate) struct StateMachine {
     timeline_name: String,
     catalog: Arc<Catalog>,
     pool: Arc<ConnPool>,
+    conns: HashMap<String, Conn>,
     segments: Arc<RwLock<Vec<Segment>>>,
 }
 
@@ -112,9 +113,9 @@ impl StateMachine {
         // Create the shared watermark channel.
         let (wm_tx, wm_rx) = mpsc::channel::<Watermark>(256);
 
-        // Fence ensemble and open record streams.
-        let (_ensemble, lra, streams) =
-            fence_ensemble(&pool, &wm_tx, ensemble, tc.timeline_id, tc.term).await?;
+        // Fence ensemble.
+        let (_ensemble, lra, conns) =
+            fence_ensemble(&pool, ensemble, tc.timeline_id, tc.term).await?;
 
         let needs_trunc = lra > 0;
 
@@ -130,8 +131,13 @@ impl StateMachine {
             "new term: complete"
         );
 
+        // Subscribe each conn to forward watermarks for this timeline.
+        for conn in conns.values() {
+            conn.subscribe_watermark(tc.timeline_id, wm_tx.clone());
+        }
+
         // Initialize per-unit synced watermarks.
-        let unit_synced: HashMap<String, i64> = streams
+        let unit_synced: HashMap<String, i64> = conns
             .keys()
             .map(|ep| (ep.clone(), lra))
             .collect();
@@ -146,6 +152,7 @@ impl StateMachine {
         let segments = Arc::new(RwLock::new(initial_segments));
 
         // Build loop state and spawn the event loop.
+        // Conns are Clone (Arc internals), so the loop and StateMachine share them.
         let state = LoopState {
             timeline_id: tc.timeline_id,
             term: tc.term,
@@ -155,9 +162,8 @@ impl StateMachine {
             catalog: catalog.clone(),
             pool: pool.clone(),
             timeline_name: name.to_string(),
-            streams,
+            conns: conns.clone(),
             unit_synced,
-            wm_tx,
         };
 
         let (event_tx, event_rx) = mpsc::channel::<PendingEvent>(max_batch_size * 2);
@@ -172,6 +178,7 @@ impl StateMachine {
             timeline_name: name.to_string(),
             catalog,
             pool,
+            conns,
             segments,
         })
     }
@@ -188,13 +195,22 @@ impl StateMachine {
             .await
             .map_err(|e| ChronicleError::Internal(format!("timeline not found: {}", e)))?;
 
-        // Load initial segments.
+        // Load initial segments and select conns for all ensemble members.
         let initial_segments: Vec<Segment> = catalog
             .list_segments(name)
             .await?
             .into_iter()
             .map(|vs| vs.value)
             .collect();
+        let mut conns = HashMap::new();
+        for seg in &initial_segments {
+            for ep in &seg.ensemble {
+                if !conns.contains_key(ep) {
+                    let conn = pool.get_or_connect(ep)?;
+                    conns.insert(ep.clone(), conn);
+                }
+            }
+        }
         let segments = Arc::new(RwLock::new(initial_segments));
 
         // Subscribe to segment updates.
@@ -240,6 +256,7 @@ impl StateMachine {
             timeline_name: name.to_string(),
             catalog,
             pool,
+            conns,
             segments,
         })
     }
@@ -288,17 +305,6 @@ impl StateMachine {
             }
         };
 
-        // Build connections to all ensemble members across segments.
-        let mut conns = HashMap::new();
-        for seg in segments.iter() {
-            for ep in &seg.ensemble {
-                if !conns.contains_key(ep) {
-                    let conn = self.pool.get_or_connect(ep)?;
-                    conns.insert(ep.clone(), conn);
-                }
-            }
-        }
-
         let seg_snapshot = segments.clone();
         let shared_segments = self.segments.clone();
         drop(segments);
@@ -306,7 +312,7 @@ impl StateMachine {
         let mut stream = EventStream::new(
             self.timeline_id,
             seg_snapshot,
-            &conns,
+            &self.conns,
             start_offset,
             shared_segments,
         );
@@ -476,9 +482,9 @@ async fn flush_batch(
     let max_offset = *offsets.last().unwrap();
     let request = RecordEventsRequest { items };
 
-    // Fire to all unit streams (non-blocking).
-    for (ep, stream) in &state.streams {
-        if let Err(e) = stream.send(request.clone()).await {
+    // Fire to all unit connections (lazy stream init).
+    for (ep, conn) in &state.conns {
+        if let Err(e) = conn.send_record(request.clone()).await {
             warn!(endpoint = %ep, error = %e, "flush_batch: failed to send");
         }
     }
@@ -586,42 +592,40 @@ async fn drain_remaining(
 // Ensemble setup — fencing + stream opening
 // ---------------------------------------------------------------------------
 
-/// Fence all ensemble members and open record streams.
-/// Returns (ensemble, max_lra, streams).
+/// Fence all ensemble members.
+/// Returns (ensemble, max_lra, conns). Record streams are lazily opened on
+/// first `send_record` call.
 async fn fence_ensemble(
     pool: &Arc<ConnPool>,
-    wm_tx: &mpsc::Sender<Watermark>,
     ensemble: Vec<String>,
     timeline_id: i64,
     term: i64,
-) -> Result<(Vec<String>, i64, HashMap<String, RecordStream>), ChronicleError> {
+) -> Result<(Vec<String>, i64, HashMap<String, Conn>), ChronicleError> {
     let futs = ensemble.iter().map(|ep| {
         let ep = ep.clone();
         let pool = pool.clone();
-        let wm_tx = wm_tx.clone();
         async move {
             let conn = pool.get_or_connect(&ep)?;
             let lra = fence_unit(&conn, &ep, timeline_id, term).await?;
-            let stream = conn.open_record_stream(wm_tx).await?;
-            Ok::<_, ChronicleError>((ep, lra, stream))
+            Ok::<_, ChronicleError>((ep, lra, conn))
         }
     });
 
     let results = join_all(futs).await;
 
     let mut max_lra: i64 = 0;
-    let mut streams = HashMap::new();
+    let mut conns = HashMap::new();
     let mut final_ensemble = Vec::new();
     for result in results {
-        let (ep, lra, stream) = result?;
+        let (ep, lra, conn) = result?;
         if lra > max_lra {
             max_lra = lra;
         }
-        streams.insert(ep.clone(), stream);
+        conns.insert(ep.clone(), conn);
         final_ensemble.push(ep);
     }
 
-    Ok((final_ensemble, max_lra, streams))
+    Ok((final_ensemble, max_lra, conns))
 }
 
 async fn update_segment(

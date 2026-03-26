@@ -1,4 +1,4 @@
-use crate::conn::ConnPool;
+use crate::conn_pool::ConnPool;
 use crate::cursor::EventStream;
 use crate::error::ChronicleError;
 use crate::state_machine::StateMachine;

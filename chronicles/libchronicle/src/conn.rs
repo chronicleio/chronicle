@@ -1,16 +1,24 @@
 use crate::error::ChronicleError;
+use crate::recoverable_stream::RecoverableStream;
 use chronicle_proto::pb_ext::{
     FenceRequest, FenceResponse, FetchEventsRequest, FetchEventsResponse, RecordEventsRequest,
     RecordEventsResponse,
     chronicle_client::ChronicleClient,
 };
 use dashmap::DashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use futures_util::Stream;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::transport::{Channel, Endpoint};
-use tracing::{info, warn};
+use tonic::transport::Channel;
+use tracing::warn;
+
+// ---------------------------------------------------------------------------
+// ConnOptions
+// ---------------------------------------------------------------------------
 
 #[derive(Clone)]
 pub struct ConnOptions {
@@ -36,37 +44,104 @@ impl Default for ConnOptions {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Watermark — a write-ack received from a unit, carrying its synced offset
+// ---------------------------------------------------------------------------
+
+pub struct Watermark {
+    pub endpoint: String,
+    pub result: Result<RecordEventsResponse, ChronicleError>,
+}
+
+// ---------------------------------------------------------------------------
+// Conn — one logical connection with its own record and fetch streams
+// ---------------------------------------------------------------------------
+
 #[derive(Clone)]
 pub struct Conn {
     endpoint: String,
     client: ChronicleClient<Channel>,
+    record_stream: RecoverableStream<RecordEventsRequest>,
+    fetch_stream: RecoverableStream<FetchEventsRequest>,
+    wm_subscribers: Arc<DashMap<i64, mpsc::Sender<Watermark>>>,
+    fetch_subscribers: Arc<DashMap<i64, mpsc::Sender<Result<FetchEventsResponse, ChronicleError>>>>,
 }
 
 impl Conn {
-    pub fn connect(endpoint: &str, opts: &ConnOptions) -> Result<Self, ChronicleError> {
-        let channel = Self::build_channel(endpoint, opts)?;
-        let client = ChronicleClient::new(channel);
-        Ok(Self {
-            endpoint: endpoint.to_string(),
-            client,
-        })
-    }
+    pub(crate) fn new(endpoint: String, client: ChronicleClient<Channel>) -> Self {
+        let wm_subscribers = Arc::new(DashMap::new());
+        let fetch_subscribers: Arc<DashMap<i64, mpsc::Sender<Result<FetchEventsResponse, ChronicleError>>>> =
+            Arc::new(DashMap::new());
 
-    fn build_channel(endpoint: &str, opts: &ConnOptions) -> Result<Channel, ChronicleError> {
-        let channel = Endpoint::from_shared(endpoint.to_string())
-            .map_err(|e| ChronicleError::Transport(format!("{}: {}", endpoint, e)))?
-            .connect_timeout(opts.connect_timeout)
-            .timeout(opts.request_timeout)
-            .http2_keep_alive_interval(opts.keep_alive_interval)
-            .keep_alive_timeout(opts.keep_alive_timeout)
-            .keep_alive_while_idle(true)
-            .connect_lazy();
-        Ok(channel)
+        let record_stream = {
+            let client = client.clone();
+            let ep = endpoint.clone();
+            let subs = wm_subscribers.clone();
+            RecoverableStream::new(Arc::new(move || {
+                let mut client = client.clone();
+                let ep = ep.clone();
+                let subs = subs.clone();
+                Box::pin(async move {
+                    let (tx, rx) = mpsc::channel::<RecordEventsRequest>(64);
+                    let stream = ReceiverStream::new(rx);
+                    let response = client
+                        .record(stream)
+                        .await
+                        .map_err(|e| ChronicleError::Transport(e.to_string()))?;
+                    let handle =
+                        tokio::spawn(record_response_reader(ep, response.into_inner(), subs));
+                    Ok((tx, handle))
+                })
+            }))
+        };
+
+        let fetch_stream = {
+            let client = client.clone();
+            let ep = endpoint.clone();
+            let subs = fetch_subscribers.clone();
+            RecoverableStream::new(Arc::new(move || {
+                let mut client = client.clone();
+                let ep = ep.clone();
+                let subs = subs.clone();
+                Box::pin(async move {
+                    let (tx, rx) = mpsc::channel::<FetchEventsRequest>(64);
+                    let stream = ReceiverStream::new(rx);
+                    let response = client
+                        .fetch(stream)
+                        .await
+                        .map_err(|e| ChronicleError::Transport(e.to_string()))?;
+                    let handle =
+                        tokio::spawn(fetch_response_reader(ep, response.into_inner(), subs));
+                    Ok((tx, handle))
+                })
+            }))
+        };
+
+        Self {
+            endpoint,
+            client,
+            record_stream,
+            fetch_stream,
+            wm_subscribers,
+            fetch_subscribers,
+        }
     }
 
     pub fn endpoint(&self) -> &str {
         &self.endpoint
     }
+
+    // -- watermark subscribers ------------------------------------------------
+
+    pub fn subscribe_watermark(&self, timeline_id: i64, tx: mpsc::Sender<Watermark>) {
+        self.wm_subscribers.insert(timeline_id, tx);
+    }
+
+    pub fn unsubscribe_watermark(&self, timeline_id: i64) {
+        self.wm_subscribers.remove(&timeline_id);
+    }
+
+    // -- RPC ------------------------------------------------------------------
 
     pub async fn fence(
         &self,
@@ -81,157 +156,142 @@ impl Conn {
         Ok(response.into_inner())
     }
 
-    /// Open a fire-and-forget record stream. Responses are forwarded to `wm_tx`
-    /// by a background reader task.
-    pub async fn open_record_stream(
+    /// Send a record request. The gRPC stream is lazily opened on first call
+    /// and automatically reconnected if the previous stream died.
+    pub async fn send_record(
         &self,
-        wm_tx: mpsc::Sender<Watermark>,
-    ) -> Result<RecordStream, ChronicleError> {
-        let mut client = self.client.clone();
-        let (stream_tx, stream_rx) = mpsc::channel::<RecordEventsRequest>(64);
-        let stream = ReceiverStream::new(stream_rx);
-        let response = client
-            .record(stream)
-            .await
-            .map_err(|e| ChronicleError::Transport(e.to_string()))?;
-        let response_stream = response.into_inner();
-
-        let ep = self.endpoint.clone();
-        tokio::spawn(response_reader(ep, response_stream, wm_tx));
-
-        Ok(RecordStream { tx: stream_tx })
+        request: RecordEventsRequest,
+    ) -> Result<(), ChronicleError> {
+        self.record_stream.send(request).await
     }
 
-    pub async fn open_fetch_stream(
+    /// Start a fetch. Subscribes for responses, sends the request through the
+    /// shared fetch stream, and returns a [`FetchStream`] that yields
+    /// responses. Automatically unsubscribes when dropped.
+    pub async fn fetch(
         &self,
-        buffer: usize,
-    ) -> Result<
-        (
-            mpsc::Sender<FetchEventsRequest>,
-            tonic::Streaming<FetchEventsResponse>,
-        ),
-        ChronicleError,
-    > {
-        let mut client = self.client.clone();
-        let (tx, rx) = mpsc::channel(buffer);
-        let stream = ReceiverStream::new(rx);
-        let response = client
-            .fetch(stream)
-            .await
-            .map_err(|e| ChronicleError::Transport(e.to_string()))?;
-        Ok((tx, response.into_inner()))
+        request: FetchEventsRequest,
+    ) -> Result<FetchStream, ChronicleError> {
+        let timeline_id = request.timeline_id;
+        let (tx, rx) = mpsc::channel::<Result<FetchEventsResponse, ChronicleError>>(64);
+        self.fetch_subscribers.insert(timeline_id, tx);
+        self.fetch_stream.send(request).await?;
+        Ok(FetchStream {
+            rx,
+            timeline_id,
+            subscribers: self.fetch_subscribers.clone(),
+        })
     }
 }
 
 // ---------------------------------------------------------------------------
-// RecordStream — fire-and-forget sender into a per-unit gRPC stream
+// FetchStream — Stream wrapper that unsubscribes on drop
 // ---------------------------------------------------------------------------
 
-pub struct RecordStream {
-    tx: mpsc::Sender<RecordEventsRequest>,
+pub struct FetchStream {
+    rx: mpsc::Receiver<Result<FetchEventsResponse, ChronicleError>>,
+    timeline_id: i64,
+    subscribers: Arc<DashMap<i64, mpsc::Sender<Result<FetchEventsResponse, ChronicleError>>>>,
 }
 
-impl RecordStream {
-    /// Send a batch into the stream without waiting for watermark.
-    pub async fn send(&self, request: RecordEventsRequest) -> Result<(), ChronicleError> {
-        self.tx
-            .send(request)
-            .await
-            .map_err(|_| ChronicleError::Transport("record stream closed".into()))
+impl Stream for FetchStream {
+    type Item = Result<FetchEventsResponse, ChronicleError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.rx.poll_recv(cx)
+    }
+}
+
+impl Drop for FetchStream {
+    fn drop(&mut self) {
+        self.subscribers.remove(&self.timeline_id);
     }
 }
 
 // ---------------------------------------------------------------------------
-// Watermark — a write-ack received from a unit, carrying its synced offset
+// Record response reader — demuxes watermarks by timeline_id to subscribers
 // ---------------------------------------------------------------------------
 
-pub struct Watermark {
-    pub endpoint: String,
-    pub result: Result<RecordEventsResponse, ChronicleError>,
-}
-
-/// Background task: reads watermark responses from a unit's gRPC stream
-/// and forwards them to the shared watermark channel.
-async fn response_reader(
+async fn record_response_reader(
     endpoint: String,
     mut stream: tonic::Streaming<RecordEventsResponse>,
-    wm_tx: mpsc::Sender<Watermark>,
+    subscribers: Arc<DashMap<i64, mpsc::Sender<Watermark>>>,
 ) {
-    loop {
+    let reason = loop {
         match stream.message().await {
             Ok(Some(resp)) => {
-                if wm_tx
-                    .send(Watermark {
-                        endpoint: endpoint.clone(),
-                        result: Ok(resp),
-                    })
-                    .await
-                    .is_err()
-                {
-                    break;
+                let timeline_id = resp.timeline_id;
+                if let Some(tx) = subscribers.get(&timeline_id) {
+                    let _ = tx
+                        .send(Watermark {
+                            endpoint: endpoint.clone(),
+                            result: Ok(resp),
+                        })
+                        .await;
                 }
             }
-            Ok(None) => {
-                let _ = wm_tx
-                    .send(Watermark {
-                        endpoint: endpoint.clone(),
-                        result: Err(ChronicleError::Transport("stream ended".into())),
-                    })
-                    .await;
-                break;
-            }
+            Ok(None) => break "stream ended".to_string(),
             Err(e) => {
-                let _ = wm_tx
-                    .send(Watermark {
-                        endpoint: endpoint.clone(),
-                        result: Err(ChronicleError::Transport(e.to_string())),
-                    })
-                    .await;
-                break;
+                warn!(endpoint = %endpoint, error = %e, "record_response_reader: error");
+                break e.to_string();
             }
         }
+    };
+    // Notify all subscribers so they don't block forever.
+    for entry in subscribers.iter() {
+        let _ = entry
+            .value()
+            .send(Watermark {
+                endpoint: endpoint.clone(),
+                result: Err(ChronicleError::Transport(reason.clone())),
+            })
+            .await;
     }
-    warn!(endpoint = %endpoint, "response_reader: ended");
+    warn!(endpoint = %endpoint, reason = %reason, "record_response_reader: ended");
 }
 
 // ---------------------------------------------------------------------------
-// ConnPool
+// Fetch response reader — demuxes fetch responses by timeline_id to subscribers
 // ---------------------------------------------------------------------------
 
-struct ConnGroup {
-    conns: Vec<Conn>,
-    next: AtomicUsize,
-}
-
-pub struct ConnPool {
-    entries: DashMap<String, ConnGroup>,
-    opts: ConnOptions,
-}
-
-impl ConnPool {
-    pub fn new(opts: ConnOptions) -> Self {
-        Self {
-            entries: DashMap::new(),
-            opts,
+async fn fetch_response_reader(
+    endpoint: String,
+    mut stream: tonic::Streaming<FetchEventsResponse>,
+    subscribers: Arc<DashMap<i64, mpsc::Sender<Result<FetchEventsResponse, ChronicleError>>>>,
+) {
+    let reason = loop {
+        match stream.message().await {
+            Ok(Some(resp)) => {
+                let timeline_id = resp.timeline_id;
+                if let Some(tx) = subscribers.get(&timeline_id) {
+                    match tx.try_send(Ok(resp)) {
+                        Ok(()) => {}
+                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                            subscribers.remove(&timeline_id);
+                        }
+                        Err(mpsc::error::TrySendError::Full(_)) => {
+                            warn!(
+                                endpoint = %endpoint,
+                                timeline_id = timeline_id,
+                                "fetch subscriber full, dropping response"
+                            );
+                        }
+                    }
+                }
+            }
+            Ok(None) => break "stream ended".to_string(),
+            Err(e) => {
+                warn!(endpoint = %endpoint, error = %e, "fetch_response_reader: error");
+                break e.to_string();
+            }
         }
+    };
+    // Notify all subscribers with the error, then clear.
+    for entry in subscribers.iter() {
+        let _ = entry
+            .value()
+            .try_send(Err(ChronicleError::Transport(reason.clone())));
     }
-
-    pub fn get_or_connect(&self, endpoint: &str) -> Result<Conn, ChronicleError> {
-        if let Some(entry) = self.entries.get(endpoint) {
-            let idx = entry.next.fetch_add(1, Ordering::Relaxed) % entry.conns.len();
-            return Ok(entry.conns[idx].clone());
-        }
-        let mut conns = Vec::with_capacity(self.opts.conns_per_unit);
-        for _ in 0..self.opts.conns_per_unit {
-            conns.push(Conn::connect(endpoint, &self.opts)?);
-        }
-        info!(address = %endpoint, count = self.opts.conns_per_unit, "connected to unit");
-        let entry = ConnGroup {
-            conns,
-            next: AtomicUsize::new(0),
-        };
-        let conn = entry.conns[0].clone();
-        self.entries.insert(endpoint.to_string(), entry);
-        Ok(conn)
-    }
+    subscribers.clear();
+    warn!(endpoint = %endpoint, reason = %reason, "fetch_response_reader: ended");
 }

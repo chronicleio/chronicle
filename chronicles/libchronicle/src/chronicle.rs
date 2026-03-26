@@ -1,4 +1,5 @@
-use crate::conn::{ConnOptions, ConnPool};
+use crate::conn::ConnOptions;
+use crate::conn_pool::ConnPool;
 use crate::error::ChronicleError;
 use crate::timeline::Timeline;
 use crate::TimelineOptions;
