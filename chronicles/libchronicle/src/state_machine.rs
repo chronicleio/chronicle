@@ -101,17 +101,7 @@ impl StateMachine {
                 })
             })
             .await?;
-        let previous: Vec<String> = writable_seg.value.ensemble.clone();
-
-        let units = catalog.list_writable_units().await?;
-        let ensemble =
-            select_ensemble(&units, replication_factor, &previous, &[]).ok_or_else(|| {
-                ChronicleError::UnitNotEnough(format!(
-                    "need {} writable units, have {}",
-                    replication_factor,
-                    units.len()
-                ))
-            })?;
+        let ensemble: Vec<String> = writable_seg.value.ensemble.clone();
 
         info!(
             timeline_id = tc.timeline_id,
@@ -123,19 +113,10 @@ impl StateMachine {
         let (wm_tx, wm_rx) = mpsc::channel::<Watermark>(256);
 
         // Fence ensemble and open record streams.
-        let (ensemble, lra, streams) =
+        let (_ensemble, lra, streams) =
             fence_ensemble(&pool, &wm_tx, ensemble, tc.timeline_id, tc.term).await?;
 
         let needs_trunc = lra > 0;
-
-        // Update the writable segment with the selected ensemble.
-        let updated_seg = Segment {
-            ensemble: ensemble.clone(),
-            start_offset: lra + 1,
-        };
-        catalog
-            .put_segment(&tc.name, &updated_seg, writable_seg.version)
-            .await?;
 
         // Persist LRA.
         let mut updated = tc.clone();
