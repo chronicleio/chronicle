@@ -2,8 +2,7 @@ use crate::error::ChronicleError;
 use crate::recoverable_stream::RecoverableStream;
 use chronicle_proto::pb_ext::{
     FenceRequest, FenceResponse, FetchEventsRequest, FetchEventsResponse, RecordEventsRequest,
-    RecordEventsResponse,
-    chronicle_client::ChronicleClient,
+    RecordEventsResponse, chronicle_client::ChronicleClient,
 };
 use dashmap::DashMap;
 use futures_util::Stream;
@@ -70,8 +69,9 @@ pub struct Conn {
 impl Conn {
     pub(crate) fn new(endpoint: String, client: ChronicleClient<Channel>) -> Self {
         let wm_subscribers = Arc::new(DashMap::new());
-        let fetch_subscribers: Arc<DashMap<i64, mpsc::Sender<Result<FetchEventsResponse, ChronicleError>>>> =
-            Arc::new(DashMap::new());
+        let fetch_subscribers: Arc<
+            DashMap<i64, mpsc::Sender<Result<FetchEventsResponse, ChronicleError>>>,
+        > = Arc::new(DashMap::new());
 
         let record_stream = {
             let client = client.clone();
@@ -141,6 +141,18 @@ impl Conn {
         self.wm_subscribers.remove(&timeline_id);
     }
 
+    // -- lifecycle ------------------------------------------------------------
+
+    /// Gracefully close both record and fetch streams: drop request senders
+    /// so servers see end-of-stream, wait for response readers to drain,
+    /// then clear all subscribers.
+    pub async fn close(&self) {
+        self.record_stream.close().await;
+        self.fetch_stream.close().await;
+        self.wm_subscribers.clear();
+        self.fetch_subscribers.clear();
+    }
+
     // -- RPC ------------------------------------------------------------------
 
     pub async fn fence(
@@ -158,24 +170,19 @@ impl Conn {
 
     /// Send a record request. The gRPC stream is lazily opened on first call
     /// and automatically reconnected if the previous stream died.
-    pub async fn send_record(
-        &self,
-        request: RecordEventsRequest,
-    ) -> Result<(), ChronicleError> {
+    pub async fn send_record(&self, request: RecordEventsRequest) -> Result<(), ChronicleError> {
         self.record_stream.send(request).await
     }
 
     /// Start a fetch. Subscribes for responses, sends the request through the
     /// shared fetch stream, and returns a [`FetchStream`] that yields
     /// responses. Automatically unsubscribes when dropped.
-    pub async fn fetch(
-        &self,
-        request: FetchEventsRequest,
-    ) -> Result<FetchStream, ChronicleError> {
+    pub async fn fetch(&self, request: FetchEventsRequest) -> Result<FetchStream, ChronicleError> {
         let timeline_id = request.timeline_id;
         let (tx, rx) = mpsc::channel::<Result<FetchEventsResponse, ChronicleError>>(64);
-        self.fetch_subscribers.insert(timeline_id, tx);
+        let entry = self.fetch_subscribers.entry(timeline_id);
         self.fetch_stream.send(request).await?;
+        entry.insert(tx);
         Ok(FetchStream {
             rx,
             timeline_id,

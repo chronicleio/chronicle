@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
-use tokio::task::AbortHandle;
+use tokio::task::JoinHandle;
 
 // ---------------------------------------------------------------------------
 // StreamState — active sender + its background reader, lifecycle-tied
@@ -12,18 +12,26 @@ use tokio::task::AbortHandle;
 
 struct StreamState<Req: Send + 'static> {
     tx: mpsc::Sender<Req>,
-    reader: AbortHandle,
+    /// Wrapped in Option so graceful close can take it without triggering
+    /// the abort in Drop.
+    reader: Option<JoinHandle<()>>,
 }
 
 impl<Req: Send + 'static> StreamState<Req> {
     fn is_alive(&self) -> bool {
-        !self.tx.is_closed() && !self.reader.is_finished()
+        !self.tx.is_closed()
+            && self
+                .reader
+                .as_ref()
+                .is_some_and(|r| !r.is_finished())
     }
 }
 
 impl<Req: Send + 'static> Drop for StreamState<Req> {
     fn drop(&mut self) {
-        self.reader.abort();
+        if let Some(handle) = self.reader.take() {
+            handle.abort();
+        }
     }
 }
 
@@ -38,7 +46,7 @@ pub(crate) type StreamFactory<Req> = Arc<
                 Box<
                     dyn Future<
                             Output = Result<
-                                (mpsc::Sender<Req>, tokio::task::JoinHandle<()>),
+                                (mpsc::Sender<Req>, JoinHandle<()>),
                                 ChronicleError,
                             >,
                         > + Send,
@@ -89,7 +97,7 @@ impl<Req: Send + 'static> RecoverableStream<Req> {
             let (tx, handle) = (self.factory)().await?;
             *guard = Some(StreamState {
                 tx,
-                reader: handle.abort_handle(),
+                reader: Some(handle),
             });
         }
         guard
@@ -99,5 +107,22 @@ impl<Req: Send + 'static> RecoverableStream<Req> {
             .send(request)
             .await
             .map_err(|_| ChronicleError::Transport("stream closed".into()))
+    }
+
+    /// Gracefully close the stream: drop the request sender so the server
+    /// sees end-of-stream, then wait for the response reader to drain
+    /// remaining messages and exit.
+    pub async fn close(&self) {
+        let mut guard = self.state.lock().await;
+        if let Some(state) = guard.as_mut() {
+            // Take the reader handle out so Drop won't abort it.
+            let handle = state.reader.take();
+            // Drop the state (including tx) — closes the request stream.
+            guard.take();
+            // Wait for the reader to finish processing remaining responses.
+            if let Some(h) = handle {
+                let _ = h.await;
+            }
+        }
     }
 }

@@ -110,7 +110,7 @@ impl WalState {
 
 struct Inner {
     buffer: sync::mpsc::Sender<(Vec<u8>, oneshot::Sender<i64>)>,
-    synced_offset: Receiver<i64>,
+    commit_offset: Receiver<i64>,
     state: Mutex<WalState>,
 }
 
@@ -143,7 +143,7 @@ impl Wal {
         let (buf_tx, buf_rx) = channel::<(Vec<u8>, oneshot::Sender<i64>)>(1024);
 
         let (advanced_offset_tx, advanced_offset_rx) = watch::channel(INVALID_OFFSET);
-        let (synced_offset_tx, synced_offset_rx) = watch::channel(INVALID_OFFSET);
+        let (commit_offset_tx, commit_offset_rx) = watch::channel(INVALID_OFFSET);
 
         let dir = PathBuf::from(&options.dir);
 
@@ -184,7 +184,7 @@ impl Wal {
 
         let inner = Arc::new(Inner {
             buffer: buf_tx,
-            synced_offset: synced_offset_rx,
+            commit_offset: commit_offset_rx,
             state: Mutex::new(wal_state),
         });
 
@@ -197,7 +197,7 @@ impl Wal {
         let wal_syncer_handle = task::spawn(bg_wal_syncer(
             inner.clone(),
             advanced_offset_rx,
-            synced_offset_tx,
+            commit_offset_tx,
         ));
 
         Ok(Wal {
@@ -221,7 +221,7 @@ impl Wal {
     }
 
     pub fn watch_synced(&self) -> Receiver<i64> {
-        self.inner.synced_offset.clone()
+        self.inner.commit_offset.clone()
     }
 
     pub async fn read_stream(
@@ -438,7 +438,7 @@ async fn flush_batch(
 async fn bg_wal_syncer(
     inner: Arc<Inner>,
     mut advanced_offset_rx: watch::Receiver<i64>,
-    synced_offset_tx: watch::Sender<i64>,
+    commit_offset_tx: watch::Sender<i64>,
 ) {
     loop {
         match advanced_offset_rx.changed().await {
@@ -449,7 +449,7 @@ async fn bg_wal_syncer(
                 if let Some(m) = crate::observability::global_metrics() {
                     m.wal_sync_latency.record(start.elapsed().as_secs_f64(), &[]);
                 }
-                if let Err(err) = synced_offset_tx.send(advanced_offset) {
+                if let Err(err) = commit_offset_tx.send(advanced_offset) {
                     warn!(error = ?err, "no active subscriber for synced offset");
                 }
             }

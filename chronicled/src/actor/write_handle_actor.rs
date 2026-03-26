@@ -62,8 +62,8 @@ impl WriteActor {
                     break;
                 }
                 _ = watch_monitor.changed() => {
-                    let synced_offset = *watch_monitor.borrow();
-                    let new_head = inflight_synced.partition_point(|(offset, _)| *offset <= synced_offset);
+                    let commit_offset = *watch_monitor.borrow();
+                    let new_head = inflight_synced.partition_point(|(offset, _)| *offset <= commit_offset);
                     for (_, envelope) in inflight_synced.drain(0..new_head) {
                         let request = envelope.request;
                         let event = request.event.unwrap();

@@ -98,7 +98,7 @@ impl Chronicle for UnitService {
                                 metrics.failed_requests.add(1, &[]);
                                 let response = RecordEventsResponse {
                                     code: StatusCode::InvalidTerm.into(),
-                                    synced_offset: -1,
+                                    commit_offset: -1,
                                     timeline_id,
                                     term,
                                 };
@@ -148,7 +148,7 @@ impl Chronicle for UnitService {
                         // Phase 3: send one watermark ack response.
                         let response = RecordEventsResponse {
                             code: error_code.unwrap_or(StatusCode::Ok.into()),
-                            synced_offset: max_offset,
+                            commit_offset: max_offset,
                             timeline_id,
                             term: error_term,
                         };

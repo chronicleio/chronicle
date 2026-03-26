@@ -48,7 +48,7 @@ struct LoopState {
     pool: Arc<ConnPool>,
     timeline_name: String,
     conns: HashMap<String, Conn>,
-    unit_synced: HashMap<String, i64>,
+    unit_committed: HashMap<String, i64>,
 }
 
 struct InflightBatch {
@@ -137,7 +137,7 @@ impl StateMachine {
         }
 
         // Initialize per-unit synced watermarks.
-        let unit_synced: HashMap<String, i64> = conns
+        let unit_committed: HashMap<String, i64> = conns
             .keys()
             .map(|ep| (ep.clone(), lra))
             .collect();
@@ -163,7 +163,7 @@ impl StateMachine {
             pool: pool.clone(),
             timeline_name: name.to_string(),
             conns: conns.clone(),
-            unit_synced,
+            unit_committed,
         };
 
         let (event_tx, event_rx) = mpsc::channel::<PendingEvent>(max_batch_size * 2);
@@ -509,8 +509,8 @@ fn process_watermark(
         Ok(resp) => {
             if resp.code == StatusCode::Ok as i32 {
                 state
-                    .unit_synced
-                    .insert(wm.endpoint, resp.synced_offset);
+                    .unit_committed
+                    .insert(wm.endpoint, resp.commit_offset);
                 drain_resolved(state, inflight);
             } else if resp.code == StatusCode::Fenced as i32 {
                 fail_all_inflight(
@@ -541,7 +541,7 @@ fn drain_resolved(
     state: &mut LoopState,
     inflight: &mut VecDeque<InflightBatch>,
 ) {
-    let global_synced = state.unit_synced.values().copied().min().unwrap_or(-1);
+    let global_synced = state.unit_committed.values().copied().min().unwrap_or(-1);
 
     while let Some(front) = inflight.front() {
         if front.max_offset <= global_synced {

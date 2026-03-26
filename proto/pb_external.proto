@@ -67,7 +67,7 @@ message RecordEventsRequestItem {
 
 message RecordEventsResponse {
   StatusCode code = 1;
-  int64 synced_offset = 2;
+  int64 commit_offset = 2;
   int64 timeline_id = 3;
   int64 term = 4;
 }
