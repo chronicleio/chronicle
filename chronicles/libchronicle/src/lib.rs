@@ -109,24 +109,40 @@ const DEFAULT_BATCH_SIZE: usize = 256;
 const DEFAULT_LINGER: std::time::Duration = std::time::Duration::from_millis(5);
 
 #[derive(Debug, Clone)]
+pub enum TimelineMode {
+    ReadWrite {
+        replication_factor: usize,
+        schema_id: Option<String>,
+        max_batch_size: usize,
+        linger: std::time::Duration,
+    },
+    ReadOnly,
+}
+
+impl Default for TimelineMode {
+    fn default() -> Self {
+        Self::ReadWrite {
+            replication_factor: DEFAULT_REPLICATION_FACTOR,
+            schema_id: None,
+            max_batch_size: DEFAULT_BATCH_SIZE,
+            linger: DEFAULT_LINGER,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct TimelineOptions {
-    pub(crate) replication_factor: usize,
-    pub(crate) schema_id: Option<String>,
     pub(crate) retention: Option<std::time::Duration>,
     pub(crate) compaction: bool,
-    pub(crate) max_batch_size: usize,
-    pub(crate) linger: std::time::Duration,
+    pub(crate) mode: TimelineMode,
 }
 
 impl Default for TimelineOptions {
     fn default() -> Self {
         Self {
-            replication_factor: DEFAULT_REPLICATION_FACTOR,
-            schema_id: None,
             retention: None,
             compaction: false,
-            max_batch_size: DEFAULT_BATCH_SIZE,
-            linger: DEFAULT_LINGER,
+            mode: TimelineMode::default(),
         }
     }
 }
@@ -136,14 +152,11 @@ impl TimelineOptions {
         Self::default()
     }
 
-    pub fn schema_id(mut self, id: impl Into<String>) -> Self {
-        self.schema_id = Some(id.into());
-        self
-    }
-
-    pub fn replication_factor(mut self, rf: usize) -> Self {
-        self.replication_factor = rf;
-        self
+    pub fn readonly() -> Self {
+        Self {
+            mode: TimelineMode::ReadOnly,
+            ..Self::default()
+        }
     }
 
     pub fn retention(mut self, duration: std::time::Duration) -> Self {
@@ -156,18 +169,8 @@ impl TimelineOptions {
         self
     }
 
-    pub fn max_batch_size(mut self, size: usize) -> Self {
-        self.max_batch_size = size;
+    pub fn mode(mut self, mode: TimelineMode) -> Self {
+        self.mode = mode;
         self
     }
-
-    pub fn linger(mut self, duration: std::time::Duration) -> Self {
-        self.linger = duration;
-        self
-    }
-}
-
-#[async_trait::async_trait]
-pub trait Writer {
-    async fn record(&self, event: Event) -> Result<Offset, ChronicleError>;
 }
