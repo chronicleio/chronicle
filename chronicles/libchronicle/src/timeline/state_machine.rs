@@ -1,7 +1,7 @@
 use crate::conn::{Conn, Watermark};
-use crate::conn_pool::ConnPool;
-use crate::cursor::EventStream;
-use crate::ensemble::select_ensemble;
+use crate::conn::conn_pool::ConnPool;
+use super::cursor::EventStream;
+use super::ensemble::select_ensemble;
 use crate::error::ChronicleError;
 use crate::{Event as UserEvent, FetchOptions, StartPosition};
 use crate::Offset;

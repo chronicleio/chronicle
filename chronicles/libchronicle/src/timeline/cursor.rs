@@ -1,4 +1,5 @@
 use crate::conn::Conn;
+
 use crate::error::ChronicleError;
 use crate::Event;
 use chronicle_proto::pb_catalog::Segment;

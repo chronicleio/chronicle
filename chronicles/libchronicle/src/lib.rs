@@ -2,13 +2,8 @@ use crate::error::ChronicleError;
 
 pub mod chronicle;
 pub mod conn;
-pub mod conn_pool;
-pub mod cursor;
-pub mod ensemble;
 pub mod error;
-pub mod observability;
-mod recoverable_stream;
-pub mod state_machine;
+pub mod metric;
 pub mod timeline;
 
 #[derive(Debug, Clone)]
@@ -45,7 +40,7 @@ impl Event {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Offset(pub i64);
 
-pub use cursor::EventStream;
+pub use timeline::cursor::EventStream;
 
 #[derive(Debug, Clone)]
 pub enum StartPosition {

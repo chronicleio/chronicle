@@ -1,4 +1,4 @@
-use crate::conn::{Conn, ConnOptions};
+use super::{Conn, ConnOptions};
 use crate::error::ChronicleError;
 use chronicle_proto::pb_ext::chronicle_client::ChronicleClient;
 use dashmap::DashMap;

@@ -1,5 +1,5 @@
 use crate::conn::ConnOptions;
-use crate::conn_pool::ConnPool;
+use crate::conn::conn_pool::ConnPool;
 use crate::error::ChronicleError;
 use crate::timeline::Timeline;
 use crate::TimelineOptions;
@@ -73,11 +73,6 @@ impl Chronicle {
             pool: Arc::new(ConnPool::new(options.conn_opts.clone())),
             catalog,
         }
-    }
-
-    pub async fn create_timeline(&self, name: &str) -> Result<(), ChronicleError> {
-        self.catalog.create_timeline(name).await?;
-        Ok(())
     }
 
     pub async fn open_timeline(&self, name: &str, options: TimelineOptions) -> Result<Timeline, ChronicleError> {

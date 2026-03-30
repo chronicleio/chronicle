@@ -1,5 +1,5 @@
 use crate::error::ChronicleError;
-use crate::recoverable_stream::RecoverableStream;
+use super::recoverable_stream::RecoverableStream;
 use chronicle_proto::pb_ext::{
     FenceRequest, FenceResponse, FetchEventsRequest, FetchEventsResponse, RecordEventsRequest,
     RecordEventsResponse, chronicle_client::ChronicleClient,

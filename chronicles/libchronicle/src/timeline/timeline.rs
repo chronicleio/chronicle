@@ -1,7 +1,7 @@
-use crate::conn_pool::ConnPool;
-use crate::cursor::EventStream;
+use crate::conn::conn_pool::ConnPool;
+use super::cursor::EventStream;
 use crate::error::ChronicleError;
-use crate::state_machine::StateMachine;
+use super::state_machine::StateMachine;
 use crate::{Event as UserEvent, FetchOptions, Offset, TimelineOptions, Writer};
 use catalog::Catalog;
 use std::sync::Arc;
