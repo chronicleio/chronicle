@@ -255,6 +255,36 @@ impl OxiaCatalog {
         Ok(segments.into_iter().last())
     }
 
+    /// Get the segment that covers a given offset (floor lookup).
+    ///
+    /// Scans segments with `start_offset <= offset` and returns the last one
+    /// (the segment with the largest start_offset that doesn't exceed `offset`).
+    pub async fn get_segment_for_offset(
+        &self,
+        timeline_name: &str,
+        offset: i64,
+    ) -> Result<Option<Versioned<Segment>>, CatalogError> {
+        let min_key = crate::segment_key_prefix(timeline_name);
+        // Exclusive upper bound: offset + 1 so we include seg-{offset} itself.
+        let max_key = crate::segment_key(timeline_name, offset + 1);
+
+        let result = self
+            .client
+            .range_scan(min_key, max_key)
+            .await
+            .map_err(CatalogError::from)?;
+
+        // Take the last record — the segment with the largest start_offset <= offset.
+        if let Some(record) = result.records.last() {
+            if let Some(ref value) = record.value {
+                let seg = Segment::decode(value.as_slice())
+                    .map_err(|e| CatalogError::Internal(format!("failed to decode segment: {}", e)))?;
+                return Ok(Some(Versioned::new(seg, record.version.version_id)));
+            }
+        }
+        Ok(None)
+    }
+
     /// Get an existing timeline or create a new one if it doesn't exist.
     ///
     /// Uses `ExpectVersionId(-1)` for creation so that concurrent callers
@@ -285,7 +315,7 @@ impl OxiaCatalog {
     ) -> Result<Versioned<Segment>, CatalogError>
     where
         F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = Result<Vec<String>, CatalogError>>,
+        Fut: Future<Output = Result<Vec<String>, CatalogError>>,
     {
         if let Some(last) = self.get_last_segment(timeline_name).await? {
             return Ok(last);

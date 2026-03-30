@@ -13,7 +13,7 @@ use futures_util::future::join_all;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 
 const MAX_FENCE_ATTEMPTS: u64 = 5;
@@ -27,10 +27,7 @@ enum Mode {
         event_tx: Option<mpsc::Sender<PendingEvent>>,
         loop_task: Option<tokio::task::JoinHandle<()>>,
     },
-    ReadOnly {
-        /// Background task that watches for new segments via Oxia subscription.
-        _seg_watcher: tokio::task::JoinHandle<()>,
-    },
+    ReadOnly,
 }
 
 // ---------------------------------------------------------------------------
@@ -72,8 +69,6 @@ pub struct Timeline {
     options: TimelineOptions,
     catalog: Arc<Catalog>,
     pool: Arc<ConnPool>,
-    conns: HashMap<String, Conn>,
-    segments: Arc<RwLock<Vec<Segment>>>,
 }
 
 impl Timeline {
@@ -83,26 +78,16 @@ impl Timeline {
         name: &str,
         options: TimelineOptions,
     ) -> Result<Self, ChronicleError> {
-        // Resolve timeline context — ReadWrite claims a new term, ReadOnly just reads.
         let tc = match &options.mode {
             TimelineMode::ReadWrite { .. } => catalog.tl_new_term(name).await?,
             TimelineMode::ReadOnly => catalog
                 .get_timeline(name)
                 .await
-                .map_err(|e| ChronicleError::Internal(format!("timeline not found: {}", e)))?,
+                .map_err(|_| ChronicleError::TimelineNotFound(name.to_string()))?,
         };
 
-        // Load initial segments.
-        let initial_segments: Vec<Segment> = catalog
-            .list_segments(name)
-            .await?
-            .into_iter()
-            .map(|vs| vs.value)
-            .collect();
-        let segments = Arc::new(RwLock::new(initial_segments));
-
-        // Build mode-specific state: fencing + write loop vs segment watcher.
-        let (mode, conns) = match &options.mode {
+        // Build mode-specific state: fencing + write loop for ReadWrite, nothing for ReadOnly.
+        let mode = match &options.mode {
             TimelineMode::ReadWrite {
                 replication_factor,
                 max_batch_size,
@@ -173,68 +158,19 @@ impl Timeline {
                     catalog: catalog.clone(),
                     pool: pool.clone(),
                     timeline_name: name.to_string(),
-                    conns: conns.clone(),
+                    conns,
                     unit_committed,
                 };
 
                 let (event_tx, event_rx) = mpsc::channel::<PendingEvent>(*max_batch_size * 2);
                 let loop_task = tokio::spawn(event_loop(state, event_rx, wm_rx, *max_batch_size, *linger));
 
-                let mode = Mode::ReadWrite {
+                Mode::ReadWrite {
                     event_tx: Some(event_tx),
                     loop_task: Some(loop_task),
-                };
-                (mode, conns)
-            }
-            TimelineMode::ReadOnly => {
-                // Connect to all ensemble members from existing segments.
-                let mut conns = HashMap::new();
-                let current_segments = segments.read().await;
-                for seg in current_segments.iter() {
-                    for ep in &seg.ensemble {
-                        if !conns.contains_key(ep) {
-                            let conn = pool.get_or_connect(ep)?;
-                            conns.insert(ep.clone(), conn);
-                        }
-                    }
                 }
-
-                drop(current_segments);
-
-                // Subscribe to segment updates.
-                let mut seg_rx = catalog
-                    .subscribe_segments(name)
-                    .await
-                    .map_err(|e| ChronicleError::Internal(format!("segment subscription failed: {}", e)))?;
-
-                // Spawn background task that refreshes segments on subscription updates.
-                let seg_ref = segments.clone();
-                let cat_ref = catalog.clone();
-                let tl_name = name.to_string();
-                let seg_watcher = tokio::spawn(async move {
-                    while let Some(highest_key) = seg_rx.recv().await {
-                        match cat_ref.list_segments(&tl_name).await {
-                            Ok(versioned_segs) => {
-                                let new_segs: Vec<Segment> =
-                                    versioned_segs.into_iter().map(|vs| vs.value).collect();
-                                *seg_ref.write().await = new_segs;
-                            }
-                            Err(e) => {
-                                warn!(
-                                    key = %highest_key,
-                                    error = %e,
-                                    "failed to refresh segments"
-                                );
-                            }
-                        }
-                    }
-                });
-
-                let mode = Mode::ReadOnly {
-                    _seg_watcher: seg_watcher,
-                };
-                (mode, conns)
             }
+            TimelineMode::ReadOnly => Mode::ReadOnly,
         };
 
         info!(
@@ -250,8 +186,6 @@ impl Timeline {
             options,
             catalog,
             pool,
-            conns,
-            segments,
         })
     }
 
@@ -278,13 +212,9 @@ impl Timeline {
     }
 
     pub async fn fetch(&self, options: FetchOptions) -> Result<EventStream, ChronicleError> {
-        let segments = self.segments.read().await;
-
         // Resolve start offset.
         let start_offset = match options.start {
-            StartPosition::Earliest => {
-                segments.first().map(|s| s.start_offset).unwrap_or(0)
-            }
+            StartPosition::Earliest => 0,
             StartPosition::Latest => {
                 let tc = self.catalog.get_timeline(&self.timeline_name).await
                     .map_err(|e| ChronicleError::Internal(format!("failed to get timeline: {}", e)))?;
@@ -298,16 +228,12 @@ impl Timeline {
             }
         };
 
-        let seg_snapshot = segments.clone();
-        let shared_segments = self.segments.clone();
-        drop(segments);
-
         let mut stream = EventStream::new(
             self.timeline_id,
-            seg_snapshot,
-            &self.conns,
+            self.timeline_name.clone(),
+            self.catalog.clone(),
+            self.pool.clone(),
             start_offset,
-            shared_segments,
         );
 
         if let Some(limit) = options.limit {
@@ -335,9 +261,7 @@ impl Timeline {
                     let _ = task.await;
                 }
             }
-            Mode::ReadOnly { .. } => {
-                // Watcher will be dropped when Timeline is dropped.
-            }
+            Mode::ReadOnly => {}
         }
         info!(timeline_id = self.timeline_id, "timeline closed");
     }

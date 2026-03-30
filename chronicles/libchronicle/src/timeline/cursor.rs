@@ -1,17 +1,16 @@
 use crate::conn::Conn;
-
+use crate::conn::conn_pool::ConnPool;
 use crate::error::ChronicleError;
 use crate::Event;
+use catalog::Catalog;
 use chronicle_proto::pb_catalog::Segment;
 use chronicle_proto::pb_ext::{ChunkType, FetchEventsRequest};
 use futures_util::{Stream, StreamExt};
-use std::collections::HashMap;
-use std::pin::Pin;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
 use tracing::warn;
 
 type InnerStream = Pin<Box<dyn Stream<Item = Result<Event, ChronicleError>> + Send>>;
@@ -21,11 +20,9 @@ const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 pub struct EventStream {
     timeline_id: i64,
-    segments: Vec<Segment>,
-    /// Shared segment list updated by the segment subscription watcher.
-    /// Used to refresh segments in tail mode.
-    shared_segments: Arc<RwLock<Vec<Segment>>>,
-    conns: HashMap<String, Conn>,
+    timeline_name: String,
+    catalog: Arc<Catalog>,
+    pool: Arc<ConnPool>,
     position: Arc<AtomicI64>,
     inner: Option<InnerStream>,
     tail: bool,
@@ -36,23 +33,21 @@ pub struct EventStream {
     poll_interval: Duration,
     current_backoff: Duration,
     retries: usize,
-    /// When true, we need to refresh segments before reopening inner stream.
-    needs_segment_refresh: bool,
 }
 
 impl EventStream {
     pub(crate) fn new(
         timeline_id: i64,
-        segments: Vec<Segment>,
-        conns: &HashMap<String, Conn>,
+        timeline_name: String,
+        catalog: Arc<Catalog>,
+        pool: Arc<ConnPool>,
         start_offset: i64,
-        shared_segments: Arc<RwLock<Vec<Segment>>>,
     ) -> Self {
         Self {
             timeline_id,
-            segments,
-            shared_segments,
-            conns: conns.clone(),
+            timeline_name,
+            catalog,
+            pool,
             position: Arc::new(AtomicI64::new(start_offset)),
             inner: None,
             tail: false,
@@ -63,7 +58,6 @@ impl EventStream {
             poll_interval: DEFAULT_POLL_INTERVAL,
             current_backoff: DEFAULT_POLL_INTERVAL,
             retries: 0,
-            needs_segment_refresh: false,
         }
     }
 
@@ -82,23 +76,11 @@ impl EventStream {
         self
     }
 
-    fn segment_for_offset(segments: &[Segment], offset: i64) -> Result<&Segment, ChronicleError> {
-        segments
-            .iter()
-            .rev()
-            .find(|seg| seg.start_offset <= offset)
-            .ok_or_else(|| {
-                ChronicleError::Internal(format!("no segment covers offset {}", offset))
-            })
-    }
-
-    fn pick_conn<'a>(
-        conns: &'a HashMap<String, Conn>,
-        segment: &Segment,
-    ) -> Result<&'a Conn, ChronicleError> {
+    fn pick_conn(pool: &ConnPool, segment: &Segment) -> Result<Conn, ChronicleError> {
         for ep in &segment.ensemble {
-            if let Some(conn) = conns.get(ep) {
-                return Ok(conn);
+            match pool.get_or_connect(ep) {
+                Ok(conn) => return Ok(conn),
+                Err(_) => continue,
             }
         }
         Err(ChronicleError::UnitNotEnough(
@@ -108,15 +90,23 @@ impl EventStream {
 
     async fn open_inner(
         timeline_id: i64,
-        segments: &[Segment],
-        conns: &HashMap<String, Conn>,
+        timeline_name: &str,
+        catalog: &Catalog,
+        pool: &ConnPool,
         position: &Arc<AtomicI64>,
     ) -> Result<InnerStream, ChronicleError> {
         let start = position.load(Ordering::Relaxed);
-        let segment = Self::segment_for_offset(segments, start)?;
-        let conn = Self::pick_conn(conns, segment)?;
 
-        // Returns a FetchStream (impl Stream) that auto-unsubscribes on drop.
+        let segment = catalog
+            .get_segment_for_offset(timeline_name, start)
+            .await
+            .map_err(|e| ChronicleError::Internal(format!("segment lookup failed: {}", e)))?
+            .ok_or_else(|| {
+                ChronicleError::Internal(format!("no segment covers offset {}", start))
+            })?;
+
+        let conn = Self::pick_conn(pool, &segment.value)?;
+
         let mut fetch = conn
             .fetch(FetchEventsRequest {
                 timeline_id,
@@ -149,7 +139,6 @@ impl EventStream {
                     break;
                 }
             }
-            // FetchStream dropped here — auto-unsubscribes.
         };
 
         Ok(Box::pin(stream))
@@ -181,26 +170,16 @@ impl Stream for EventStream {
                 return Poll::Ready(None);
             }
 
-            // Refresh segments from the shared list if needed (tail mode).
-            if self.needs_segment_refresh {
-                let shared = self.shared_segments.clone();
-                let mut fut = Box::pin(async move { shared.read().await.clone() });
-                match fut.as_mut().poll(cx) {
-                    Poll::Ready(new_segments) => {
-                        self.segments = new_segments;
-                        self.needs_segment_refresh = false;
-                    }
-                    Poll::Pending => return Poll::Pending,
-                }
-            }
-
             if self.inner.is_none() {
                 let timeline_id = self.timeline_id;
-                let segments = self.segments.clone();
-                let conns = self.conns.clone();
+                let timeline_name = self.timeline_name.clone();
+                let catalog = self.catalog.clone();
+                let pool = self.pool.clone();
                 let position = self.position.clone();
 
-                let mut fut = Box::pin(Self::open_inner(timeline_id, &segments, &conns, &position));
+                let mut fut = Box::pin(async move {
+                    Self::open_inner(timeline_id, &timeline_name, &catalog, &pool, &position).await
+                });
                 match fut.as_mut().poll(cx) {
                     Poll::Ready(Ok(stream)) => {
                         self.inner = Some(stream);
@@ -235,8 +214,8 @@ impl Stream for EventStream {
                 }
                 Poll::Ready(None) => {
                     if self.tail {
+                        // Re-poll — next iteration will lazy-load the segment again.
                         self.inner = None;
-                        self.needs_segment_refresh = true;
                         cx.waker().wake_by_ref();
                         return Poll::Pending;
                     }
