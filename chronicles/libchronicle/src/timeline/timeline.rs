@@ -98,16 +98,18 @@ impl Timeline {
                 let rf = *replication_factor;
                 let writable_seg = catalog
                     .tl_fetch_or_insert_w_seg(&tc.name, || async move {
+                        // todo: support list units by policies
                         let units = catalog_ref.list_writable_units().await?;
                         select_ensemble(&units, rf, &[], &[]).ok_or_else(|| {
-                            catalog::error::CatalogError::Internal(format!(
+                            catalog::error::CatalogError::NotFound(format!(
                                 "need {} writable units, have {}",
                                 rf,
                                 units.len()
                             ))
                         })
                     })
-                    .await?;
+                    .await
+                    .map_err(|e| ChronicleError::UnitNotEnough(e.to_string()))?;
                 let ensemble: Vec<String> = writable_seg.value.ensemble.clone();
 
                 info!(
