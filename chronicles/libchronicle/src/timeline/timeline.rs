@@ -10,13 +10,17 @@ use chronicle_proto::pb_ext::{
     RecordEventsRequest, RecordEventsRequestItem, StatusCode,
 };
 use futures_util::future::join_all;
-use std::collections::{HashMap, VecDeque};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
+use tokio::time::Instant;
 use tracing::{info, warn};
 
 const MAX_FENCE_ATTEMPTS: u64 = 5;
+const MAX_QUARANTINE_RETRIES: u32 = 3;
+const QUARANTINE_BASE_BACKOFF: Duration = Duration::from_millis(500);
 
 // ---------------------------------------------------------------------------
 // Mode
@@ -86,7 +90,6 @@ impl Timeline {
                 .map_err(|_| ChronicleError::TimelineNotFound(name.to_string()))?,
         };
 
-        // Build mode-specific state: fencing + write loop for ReadWrite, nothing for ReadOnly.
         let mode = match &options.mode {
             TimelineMode::ReadWrite {
                 replication_factor,
@@ -110,7 +113,7 @@ impl Timeline {
                     })
                     .await
                     .map_err(|e| ChronicleError::UnitNotEnough(e.to_string()))?;
-                let ensemble: Vec<String> = writable_seg.value.ensemble.clone();
+                let mut ensemble: Vec<String> = writable_seg.value.ensemble.clone();
 
                 info!(
                     timeline_id = tc.timeline_id,
@@ -118,16 +121,73 @@ impl Timeline {
                     "new term: fencing ensemble"
                 );
 
-                // Create the shared watermark channel.
                 let (wm_tx, wm_rx) = mpsc::channel::<Watermark>(256);
 
-                // Fence ensemble.
-                let (_ensemble, lra, conns) =
-                    fence_ensemble(&pool, ensemble, tc.timeline_id, tc.term).await?;
+                // Fence loop: fence → quarantine failures → wait → retry or replace.
+                let mut quarantine = Quarantine::new();
+                let mut conns: HashMap<String, Conn> = HashMap::new();
+                let mut max_lra: i64 = 0;
+                let mut to_fence: Vec<String> = ensemble.clone();
+
+                let lra = loop {
+                    // Fence all to_fence endpoints.
+                    if !to_fence.is_empty() {
+                        let result = fence_ensemble(
+                            &pool, &to_fence, tc.timeline_id, tc.term,
+                        )
+                        .await?;
+
+                        if result.max_lra > max_lra {
+                            max_lra = result.max_lra;
+                        }
+                        conns.extend(result.conns);
+
+                        for ep in &result.failed {
+                            let retries = quarantine.retries_for(ep);
+                            quarantine.add(ep.clone(), retries);
+                        }
+                    }
+
+                    // All ensemble members fenced.
+                    if conns.len() == ensemble.len() {
+                        break max_lra;
+                    }
+
+                    // Wait for the next quarantined unit to become ready.
+                    let ready = quarantine.wait_and_drain_ready().await;
+
+                    to_fence.clear();
+                    for entry in ready {
+                        if entry.retries >= MAX_QUARANTINE_RETRIES {
+                            // Exceeded max retries — replace this unit.
+                            let excluded: Vec<String> = ensemble
+                                .iter()
+                                .chain(quarantine.all_endpoints().iter())
+                                .chain(std::iter::once(&entry.endpoint))
+                                .cloned()
+                                .collect();
+                            replace_failed(
+                                &catalog,
+                                name,
+                                &mut ensemble,
+                                &[entry.endpoint],
+                                &excluded,
+                                writable_seg.version,
+                            )
+                            .await?;
+                        }
+                    }
+
+                    // Collect unfenced ensemble members as to_fence.
+                    for ep in &ensemble {
+                        if !conns.contains_key(ep) && !quarantine.contains(ep) {
+                            to_fence.push(ep.clone());
+                        }
+                    }
+                };
 
                 let needs_trunc = lra > 0;
 
-                // Persist LRA.
                 let mut updated = tc.clone();
                 updated.lra = lra;
                 let _updated = catalog.put_timeline(&updated, tc.version).await?;
@@ -139,18 +199,15 @@ impl Timeline {
                     "new term: complete"
                 );
 
-                // Subscribe each conn to forward watermarks for this timeline.
                 for conn in conns.values() {
                     conn.subscribe_watermark(tc.timeline_id, wm_tx.clone());
                 }
 
-                // Initialize per-unit synced watermarks.
                 let unit_committed: HashMap<String, i64> = conns
                     .keys()
                     .map(|ep| (ep.clone(), lra))
                     .collect();
 
-                // Build loop state and spawn the event loop.
                 let state = LoopState {
                     timeline_id: tc.timeline_id,
                     term: tc.term,
@@ -512,15 +569,107 @@ async fn drain_remaining(
 // Ensemble setup — fencing + stream opening
 // ---------------------------------------------------------------------------
 
-/// Fence all ensemble members.
-/// Returns (ensemble, max_lra, conns). Record streams are lazily opened on
-/// first `send_record` call.
+struct FenceResult {
+    conns: HashMap<String, Conn>,
+    max_lra: i64,
+    failed: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Quarantine — tracks failed units with exponential backoff
+// ---------------------------------------------------------------------------
+
+#[derive(Eq, PartialEq)]
+struct QuarantineEntry {
+    endpoint: String,
+    ready_at: Instant,
+    retries: u32,
+}
+
+impl Ord for QuarantineEntry {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.ready_at.cmp(&other.ready_at)
+    }
+}
+
+impl PartialOrd for QuarantineEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+struct Quarantine {
+    heap: BinaryHeap<Reverse<QuarantineEntry>>,
+}
+
+impl Quarantine {
+    fn new() -> Self {
+        Self {
+            heap: BinaryHeap::new(),
+        }
+    }
+
+    /// Add a failed endpoint with exponential backoff based on retry count.
+    fn add(&mut self, endpoint: String, retries: u32) {
+        let backoff = QUARANTINE_BASE_BACKOFF * 2u32.saturating_pow(retries);
+        let ready_at = Instant::now() + backoff;
+        info!(
+            endpoint = %endpoint,
+            retries = retries,
+            backoff_ms = backoff.as_millis() as u64,
+            "quarantined unit"
+        );
+        self.heap.push(Reverse(QuarantineEntry {
+            endpoint,
+            ready_at,
+            retries,
+        }));
+    }
+
+    /// Get the current retry count for an endpoint (0 if not quarantined).
+    fn retries_for(&self, endpoint: &str) -> u32 {
+        self.heap
+            .iter()
+            .find(|Reverse(e)| e.endpoint == endpoint)
+            .map(|Reverse(e)| e.retries + 1)
+            .unwrap_or(0)
+    }
+
+    fn contains(&self, endpoint: &str) -> bool {
+        self.heap.iter().any(|Reverse(e)| e.endpoint == endpoint)
+    }
+
+    fn all_endpoints(&self) -> Vec<String> {
+        self.heap.iter().map(|Reverse(e)| e.endpoint.clone()).collect()
+    }
+
+    /// Wait until the earliest entry is ready and drain all ready entries.
+    async fn wait_and_drain_ready(&mut self) -> Vec<QuarantineEntry> {
+        if let Some(Reverse(earliest)) = self.heap.peek() {
+            tokio::time::sleep_until(earliest.ready_at).await;
+        }
+
+        let now = Instant::now();
+        let mut ready = Vec::new();
+        while let Some(Reverse(entry)) = self.heap.peek() {
+            if entry.ready_at <= now {
+                ready.push(self.heap.pop().unwrap().0);
+            } else {
+                break;
+            }
+        }
+        ready
+    }
+}
+
+/// Fence ensemble members concurrently. Returns fenced conns and any failed endpoints.
+/// Fenced/InvalidTerm errors are fatal and propagated immediately.
 async fn fence_ensemble(
     pool: &Arc<ConnPool>,
-    ensemble: Vec<String>,
+    ensemble: &[String],
     timeline_id: i64,
     term: i64,
-) -> Result<(Vec<String>, i64, HashMap<String, Conn>), ChronicleError> {
+) -> Result<FenceResult, ChronicleError> {
     let futs = ensemble.iter().map(|ep| {
         let ep = ep.clone();
         let pool = pool.clone();
@@ -533,19 +682,71 @@ async fn fence_ensemble(
 
     let results = join_all(futs).await;
 
-    let mut max_lra: i64 = 0;
     let mut conns = HashMap::new();
-    let mut final_ensemble = Vec::new();
-    for result in results {
-        let (ep, lra, conn) = result?;
-        if lra > max_lra {
-            max_lra = lra;
+    let mut max_lra: i64 = 0;
+    let mut failed = Vec::new();
+    for (i, result) in results.into_iter().enumerate() {
+        match result {
+            Ok((ep, lra, conn)) => {
+                if lra > max_lra {
+                    max_lra = lra;
+                }
+                conns.insert(ep, conn);
+            }
+            Err(e @ (ChronicleError::Fenced { .. } | ChronicleError::InvalidTerm { .. })) => {
+                return Err(e);
+            }
+            Err(e) => {
+                let ep = &ensemble[i];
+                warn!(endpoint = %ep, error = %e, "fence failed");
+                failed.push(ep.clone());
+            }
         }
-        conns.insert(ep.clone(), conn);
-        final_ensemble.push(ep);
     }
 
-    Ok((final_ensemble, max_lra, conns))
+    Ok(FenceResult { conns, max_lra, failed })
+}
+
+/// Replace failed members in the ensemble with new units.
+/// Returns the updated ensemble and updates the segment in the catalog.
+async fn replace_failed(
+    catalog: &Arc<Catalog>,
+    timeline_name: &str,
+    ensemble: &mut Vec<String>,
+    failed: &[String],
+    excluded: &[String],
+    segment_version: i64,
+) -> Result<(), ChronicleError> {
+    let units = catalog.list_writable_units().await?;
+    let replacements = select_ensemble(
+        &units,
+        failed.len(),
+        excluded,
+        &[],
+    )
+    .ok_or_else(|| {
+        ChronicleError::UnitNotEnough(format!(
+            "cannot replace {} failed units, not enough available units",
+            failed.len()
+        ))
+    })?;
+
+    for (old, new) in failed.iter().zip(replacements.iter()) {
+        if let Some(pos) = ensemble.iter().position(|e| e == old) {
+            warn!(old = %old, new = %new, "replacing failed ensemble member");
+            ensemble[pos] = new.clone();
+        }
+    }
+
+    let updated_seg = Segment {
+        ensemble: ensemble.clone(),
+        start_offset: 1,
+    };
+    catalog
+        .put_segment(timeline_name, &updated_seg, segment_version)
+        .await?;
+
+    Ok(())
 }
 
 async fn update_segment(
