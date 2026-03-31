@@ -7,7 +7,7 @@ use backoff::future;
 use catalog::Catalog;
 use chronicle_proto::pb_catalog::{Segment, TimelineMeta, UnitInfo};
 use chronicle_proto::pb_ext::{
-    FenceResponse, RecordEventsRequest, RecordEventsRequestItem, StatusCode,
+    RecordEventsRequest, RecordEventsRequestItem,
 };
 use futures_util::future::{join_all, select_all};
 use std::collections::VecDeque;
@@ -302,9 +302,18 @@ async fn fence_ensemble(state: &State, ensemble: &[UnitInfo]) -> Result<i64, Inn
     let mut ensemble_candidates = ensemble.to_vec();
 
     loop {
-        let fence_futures = ensemble_candidates.into_iter().map(|unit| async move {
-            let fence_response = fence_unit(state, &unit).await;
-            (unit, fence_response)
+        let fence_futures = ensemble_candidates.into_iter().map(|unit| {
+            let pool = state.pool.clone();
+            let timeout = state.options.request_timeout;
+            let timeline_id = state.meta.timeline_id;
+            let term = state.meta.term;
+            async move {
+                let result = match pool.get_or_connect(&unit.address) {
+                    Ok(conn) => conn.fence_with_retry(timeline_id, term, timeout).await,
+                    Err(e) => Err(e),
+                };
+                (unit, result)
+            }
         });
         let fence_responses = join_all(fence_futures).await;
         for (unit, result) in fence_responses {
@@ -364,32 +373,6 @@ async fn fence_ensemble(state: &State, ensemble: &[UnitInfo]) -> Result<i64, Inn
             .filter(|unit| !fenced_candidates.contains(unit))
             .collect();
     }
-}
-
-async fn fence_unit(state: &State, unit: &UnitInfo) -> Result<FenceResponse, InnerError> {
-    let conn = state.pool.get_or_connect(&unit.address)?;
-    let backoff = backoff::ExponentialBackoffBuilder::new()
-        .with_max_elapsed_time(Some(state.options.request_timeout))
-        .build();
-    future::retry_notify(
-        backoff,
-        || async {
-            match conn.fence(state.meta.timeline_id, state.meta.term).await {
-                Ok(resp) => Ok(resp),
-                Err(e @ InnerError::InvalidTerm { .. }) => Err(backoff::Error::permanent(e)),
-                Err(e) => Err(backoff::Error::transient(e)),
-            }
-        },
-        |e, retry_in| {
-            warn!(
-                unit = ?unit,
-                error = %e,
-                retry_in = ?retry_in,
-                "fence unit failed, retrying"
-            );
-        },
-    )
-    .await
 }
 
 fn prepare_batch(
@@ -455,7 +438,10 @@ async fn flush_batch(
         let pool = state.pool.clone();
         let timeout = state.options.request_timeout;
         async move {
-            let result = send_record_with_retry(&pool, &unit, request, timeout).await;
+            let result = match pool.get_or_connect(&unit.address) {
+                Ok(conn) => conn.send_record_with_retry(request, timeout).await,
+                Err(e) => Err(ChronicleError::Transport(e.to_string())),
+            };
             (unit, result)
         }
     });
@@ -484,37 +470,6 @@ async fn flush_batch(
         max_offset,
         callbacks,
     });
-}
-
-async fn send_record_with_retry(
-    pool: &ConnPool,
-    unit: &UnitInfo,
-    request: RecordEventsRequest,
-    timeout: Duration,
-) -> Result<(), ChronicleError> {
-    let backoff = backoff::ExponentialBackoffBuilder::new()
-        .with_max_elapsed_time(Some(timeout))
-        .build();
-    future::retry_notify(
-        backoff,
-        || async {
-            let conn = pool
-                .get_or_connect(&unit.address)
-                .map_err(|e| backoff::Error::transient(ChronicleError::Transport(e.to_string())))?;
-            conn.send_record(request.clone())
-                .await
-                .map_err(backoff::Error::transient)
-        },
-        |e, retry_in| {
-            warn!(
-                unit = ?unit,
-                error = %e,
-                retry_in = ?retry_in,
-                "send_record failed, retrying"
-            );
-        },
-    )
-    .await
 }
 
 async fn recover_ensemble(

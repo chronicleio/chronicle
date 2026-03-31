@@ -14,6 +14,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
+use backoff::future;
 use tracing::warn;
 // ---------------------------------------------------------------------------
 // ConnOptions
@@ -162,6 +163,63 @@ impl Conn {
     /// and automatically reconnected if the previous stream died.
     pub async fn send_record(&self, request: RecordEventsRequest) -> Result<(), ChronicleError> {
         self.record_stream.send(request).await
+    }
+
+    pub async fn fence_with_retry(
+        &self,
+        timeline_id: i64,
+        term: i64,
+        timeout: Duration,
+    ) -> Result<FenceResponse, InnerError> {
+        let backoff = backoff::ExponentialBackoffBuilder::new()
+            .with_max_elapsed_time(Some(timeout))
+            .build();
+        future::retry_notify(
+            backoff,
+            || async {
+                match self.fence(timeline_id, term).await {
+                    Ok(resp) => Ok(resp),
+                    Err(e @ InnerError::InvalidTerm { .. }) => Err(backoff::Error::permanent(e)),
+                    Err(e) => Err(backoff::Error::transient(e)),
+                }
+            },
+            |e, retry_in| {
+                warn!(
+                    endpoint = %self.endpoint,
+                    error = %e,
+                    retry_in = ?retry_in,
+                    "fence failed, retrying"
+                );
+            },
+        )
+        .await
+    }
+
+    pub async fn send_record_with_retry(
+        &self,
+        request: RecordEventsRequest,
+        timeout: Duration,
+    ) -> Result<(), ChronicleError> {
+        let backoff = backoff::ExponentialBackoffBuilder::new()
+            .with_max_elapsed_time(Some(timeout))
+            .build();
+        future::retry_notify(
+            backoff,
+            || async {
+                self.send_record(request.clone())
+                    .await
+                    .map_err(backoff::Error::transient)
+            },
+            |e, retry_in| {
+                warn!(
+                    endpoint = %self.endpoint,
+                    error = %e,
+                    retry_in = ?retry_in,
+                    "send_record failed, retrying"
+                );
+            },
+        )
+        .await
     }
 
     /// Start a fetch. Subscribes for responses, sends the request through the
