@@ -1,5 +1,6 @@
 use catalog::error::CatalogError;
 use thiserror::Error;
+use crate::error_inner::InnerError;
 
 #[derive(Error, Debug)]
 pub enum ChronicleError {
@@ -34,5 +35,12 @@ pub enum ChronicleError {
 impl From<tonic::Status> for ChronicleError {
     fn from(status: tonic::Status) -> Self {
         ChronicleError::Transport(status.to_string())
+    }
+}
+
+
+impl From<InnerError> for ChronicleError {
+    fn from(value: InnerError) -> Self {
+        todo!()
     }
 }

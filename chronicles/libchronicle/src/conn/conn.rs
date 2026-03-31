@@ -1,5 +1,6 @@
-use crate::error::ChronicleError;
 use super::recoverable_stream::RecoverableStream;
+use crate::error::ChronicleError;
+use crate::error_inner::InnerError;
 use chronicle_proto::pb_ext::{
     FenceRequest, FenceResponse, FetchEventsRequest, FetchEventsResponse, RecordEventsRequest,
     RecordEventsResponse, chronicle_client::ChronicleClient,
@@ -14,7 +15,6 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
 use tracing::warn;
-
 // ---------------------------------------------------------------------------
 // ConnOptions
 // ---------------------------------------------------------------------------
@@ -155,16 +155,12 @@ impl Conn {
 
     // -- RPC ------------------------------------------------------------------
 
-    pub async fn fence(
-        &self,
-        timeline_id: i64,
-        term: i64,
-    ) -> Result<FenceResponse, ChronicleError> {
+    pub async fn fence(&self, timeline_id: i64, term: i64) -> Result<FenceResponse, InnerError> {
         let mut client = self.client.clone();
         let response = client
             .fence(FenceRequest { timeline_id, term })
             .await
-            .map_err(|e| ChronicleError::Transport(e.to_string()))?;
+            .map_err(|e| InnerError::from(e))?;
         Ok(response.into_inner())
     }
 

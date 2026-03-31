@@ -62,7 +62,8 @@ impl OxiaCatalog {
         } else {
             &registration.zone
         };
-        let unit_id = Self::sanitize_address(&registration.address);
+        let address = &registration.unit.as_ref().expect("unit info required").address;
+        let unit_id = Self::sanitize_address(address);
         format!("{}{}/{}", UNITS_PREFIX, zone, unit_id)
     }
 
@@ -368,7 +369,8 @@ impl OxiaCatalog {
     ) -> Result<(), CatalogError> {
         let key = Self::unit_key(registration);
         let value = registration.encode_to_vec();
-        info!(address = %registration.address, zone = %registration.zone, key = %key, "register_unit");
+        let address = &registration.unit.as_ref().expect("unit info required").address;
+        info!(address = %address, zone = %registration.zone, key = %key, "register_unit");
 
         self.client
             .put(key, value)

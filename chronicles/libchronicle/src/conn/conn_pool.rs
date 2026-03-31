@@ -1,5 +1,6 @@
 use super::{Conn, ConnOptions};
 use crate::error::ChronicleError;
+use crate::error_inner::InnerError;
 use chronicle_proto::pb_ext::chronicle_client::ChronicleClient;
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -29,7 +30,7 @@ impl ConnPool {
 
     /// Return an existing conn for the endpoint (round-robin) or create a new
     /// pool entry with `conns_per_unit` conns sharing one gRPC channel.
-    pub fn get_or_connect(&self, endpoint: &str) -> Result<Conn, ChronicleError> {
+    pub fn get_or_connect(&self, endpoint: &str) -> Result<Conn, InnerError> {
         if let Some(entry) = self.entries.get(endpoint) {
             let idx = entry.next.fetch_add(1, Ordering::Relaxed) % entry.conns.len();
             return Ok(entry.conns[idx].clone());
@@ -52,9 +53,9 @@ impl ConnPool {
         Ok(conn)
     }
 
-    fn build_channel(endpoint: &str, opts: &ConnOptions) -> Result<Channel, ChronicleError> {
+    fn build_channel(endpoint: &str, opts: &ConnOptions) -> Result<Channel, InnerError> {
         let channel = Endpoint::from_shared(endpoint.to_string())
-            .map_err(|e| ChronicleError::Transport(format!("{}: {}", endpoint, e)))?
+            .map_err(|e| InnerError::Transport(format!("{}: {}", endpoint, e)))?
             .connect_timeout(opts.connect_timeout)
             .timeout(opts.request_timeout)
             .http2_keep_alive_interval(opts.keep_alive_interval)

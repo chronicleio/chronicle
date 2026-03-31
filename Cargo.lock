@@ -1824,11 +1824,13 @@ version = "0.1.0"
 dependencies = [
  "async-stream",
  "async-trait",
+ "backoff",
  "base64",
  "catalog",
  "chronicle-proto",
  "dashmap",
  "futures-util",
+ "log",
  "opentelemetry",
  "opentelemetry_sdk",
  "prost 0.13.5",

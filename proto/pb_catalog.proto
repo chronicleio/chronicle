@@ -26,8 +26,13 @@ enum UnitStatus {
   READONLY = 1;
 }
 
+message UnitInfo {
+  string id = 1;
+  string address = 2;
+}
+
 message UnitRegistration {
-  string address = 1;
+  UnitInfo unit = 1;
   UnitStatus status = 2;
   string zone = 3;
   double cpu_usage = 4;

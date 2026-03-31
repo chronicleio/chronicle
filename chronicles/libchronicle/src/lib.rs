@@ -1,3 +1,4 @@
+use std::time::Duration;
 use crate::error::ChronicleError;
 
 pub mod chronicle;
@@ -5,6 +6,7 @@ pub mod conn;
 pub mod error;
 pub mod metric;
 pub mod timeline;
+mod error_inner;
 
 #[derive(Debug, Clone)]
 pub struct Event {
@@ -132,9 +134,10 @@ impl Default for TimelineMode {
 
 #[derive(Debug, Clone)]
 pub struct TimelineOptions {
-    pub(crate) retention: Option<std::time::Duration>,
+    pub(crate) retention: Option<Duration>,
     pub(crate) compaction: bool,
     pub(crate) mode: TimelineMode,
+    pub(crate) request_timeout: Duration,
 }
 
 impl Default for TimelineOptions {
@@ -143,6 +146,7 @@ impl Default for TimelineOptions {
             retention: None,
             compaction: false,
             mode: TimelineMode::default(),
+            request_timeout: Duration::from_secs(30),
         }
     }
 }

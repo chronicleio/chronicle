@@ -1,5 +1,13 @@
-use chronicle_proto::pb_catalog::{UnitRegistration, UnitStatus};
-use std::collections::HashMap;
+use chronicle_proto::pb_catalog::{UnitInfo, UnitRegistration, UnitStatus};
+use std::collections::{HashMap, VecDeque};
+
+fn unit_info(u: &UnitRegistration) -> UnitInfo {
+    u.unit.clone().expect("unit info required")
+}
+
+fn address(u: &UnitRegistration) -> &str {
+    &u.unit.as_ref().expect("unit info required").address
+}
 
 fn pressure(u: &UnitRegistration) -> f64 {
     0.4 * u.cpu_usage + 0.4 * u.memory_usage + 0.2 * u.disk_usage
@@ -14,34 +22,42 @@ fn pressure(u: &UnitRegistration) -> f64 {
 /// 3. **Lowest pressure** — within each zone, pick the unit with the
 ///    lowest pressure (CPU/memory/disk)
 ///
-/// - `previous`: addresses from the prior ensemble — preferred if still writable
-/// - `exclude`: addresses to never select
+/// - `include_candidates`: already fenced units — preferred if still writable
+/// - `exclude_candidates`: units to never select
 pub fn select_ensemble(
-    units: &[UnitRegistration],
-    rf: usize,
-    previous: &[String],
-    exclude: &[String],
-) -> Option<Vec<String>> {
-    let candidates: Vec<&UnitRegistration> = units
+    candidates: &[UnitRegistration],
+    include_candidates: &VecDeque<UnitInfo>,
+    exclude_candidates: &VecDeque<UnitInfo>,
+) -> Option<Vec<UnitInfo>> {
+    let rf = include_candidates.len() + exclude_candidates.len();
+    let exclude_addrs: Vec<&str> = exclude_candidates
         .iter()
-        .filter(|u| u.status() == UnitStatus::Writable && !exclude.contains(&u.address))
+        .map(|u| u.address.as_str())
+        .collect();
+    let writable: Vec<&UnitRegistration> = candidates
+        .iter()
+        .filter(|u| u.status() == UnitStatus::Writable && !exclude_addrs.contains(&address(u)))
         .collect();
 
-    if candidates.len() < rf {
+    if writable.len() < rf {
         return None;
     }
 
-    let mut ensemble: Vec<String> = Vec::with_capacity(rf);
+    let mut ensemble: Vec<UnitInfo> = Vec::with_capacity(rf);
     let mut used_zones: HashMap<&str, usize> = HashMap::new();
 
-    // Phase 1: retain previous ensemble members that are still writable
-    for addr in previous {
+    // Phase 1: retain included (already fenced) members that are still writable
+    for inc in include_candidates {
         if ensemble.len() >= rf {
             break;
         }
-        if let Some(u) = candidates.iter().find(|u| u.address == *addr) {
-            ensemble.push(u.address.clone());
-            let zone = if u.zone.is_empty() { "default" } else { u.zone.as_str() };
+        if let Some(u) = writable.iter().find(|u| address(u) == inc.address) {
+            ensemble.push(unit_info(u));
+            let zone = if u.zone.is_empty() {
+                "default"
+            } else {
+                u.zone.as_str()
+            };
             *used_zones.entry(zone).or_default() += 1;
         }
     }
@@ -51,16 +67,21 @@ pub fn select_ensemble(
     }
 
     // Phase 2: fill remaining slots with zone-diverse, low-pressure units
-    let remaining: Vec<&UnitRegistration> = candidates
+    let selected_addrs: Vec<&str> = ensemble.iter().map(|u| u.address.as_str()).collect();
+    let remaining: Vec<&UnitRegistration> = writable
         .iter()
-        .filter(|u| !ensemble.contains(&u.address))
+        .filter(|u| !selected_addrs.contains(&address(u)))
         .copied()
         .collect();
 
     // Group by zone, sort each group by pressure (ascending)
     let mut by_zone: HashMap<&str, Vec<&UnitRegistration>> = HashMap::new();
     for u in &remaining {
-        let zone = if u.zone.is_empty() { "default" } else { u.zone.as_str() };
+        let zone = if u.zone.is_empty() {
+            "default"
+        } else {
+            u.zone.as_str()
+        };
         by_zone.entry(zone).or_default().push(u);
     }
     for group in by_zone.values_mut() {
@@ -90,7 +111,7 @@ pub fn select_ensemble(
             }
             let group = &by_zone[zone];
             if zone_cursors[zi] < group.len() {
-                ensemble.push(group[zone_cursors[zi]].address.clone());
+                ensemble.push(unit_info(group[zone_cursors[zi]]));
                 zone_cursors[zi] += 1;
                 added_this_pass = true;
             }
@@ -115,9 +136,12 @@ pub fn select_ensemble(
 mod tests {
     use super::*;
 
-    fn unit(addr: &str, zone: &str) -> UnitRegistration {
+    fn reg(addr: &str, zone: &str) -> UnitRegistration {
         UnitRegistration {
-            address: addr.into(),
+            unit: Some(UnitInfo {
+                id: addr.into(),
+                address: addr.into(),
+            }),
             zone: zone.into(),
             status: UnitStatus::Writable as i32,
             cpu_usage: 0.0,
@@ -126,9 +150,18 @@ mod tests {
         }
     }
 
-    fn unit_with_load(addr: &str, zone: &str, cpu: f64, mem: f64, disk: f64) -> UnitRegistration {
+    fn reg_with_load(
+        addr: &str,
+        zone: &str,
+        cpu: f64,
+        mem: f64,
+        disk: f64,
+    ) -> UnitRegistration {
         UnitRegistration {
-            address: addr.into(),
+            unit: Some(UnitInfo {
+                id: addr.into(),
+                address: addr.into(),
+            }),
             zone: zone.into(),
             status: UnitStatus::Writable as i32,
             cpu_usage: cpu,
@@ -137,63 +170,77 @@ mod tests {
         }
     }
 
+    fn info(addr: &str) -> UnitInfo {
+        UnitInfo {
+            id: addr.into(),
+            address: addr.into(),
+        }
+    }
+
+    fn include(addrs: &[&str]) -> VecDeque<UnitInfo> {
+        addrs.iter().map(|a| info(a)).collect()
+    }
+
+    fn exclude(addrs: &[&str]) -> VecDeque<UnitInfo> {
+        addrs.iter().map(|a| info(a)).collect()
+    }
+
     #[test]
     fn basic_select() {
         let units = vec![
-            unit("a", "us-east-1"),
-            unit("b", "us-west-2"),
-            unit("c", "eu-west-1"),
+            reg("a", "us-east-1"),
+            reg("b", "us-west-2"),
+            reg("c", "eu-west-1"),
         ];
-        let result = select_ensemble(&units, 2, &[], &[]).unwrap();
+        // rf = include(0) + exclude(2) = 2
+        let result = select_ensemble(&units, &include(&[]), &exclude(&["x", "y"])).unwrap();
         assert_eq!(result.len(), 2);
     }
 
     #[test]
-    fn previous_ensemble_preferred() {
+    fn include_preferred() {
         let units = vec![
-            unit("a", "zone-a"),
-            unit("b", "zone-b"),
-            unit("c", "zone-c"),
-            unit("d", "zone-d"),
+            reg("a", "zone-a"),
+            reg("b", "zone-b"),
+            reg("c", "zone-c"),
+            reg("d", "zone-d"),
         ];
-        let prev = vec!["b".into(), "c".into()];
-        let result = select_ensemble(&units, 3, &prev, &[]).unwrap();
-        assert!(result.contains(&"b".to_string()));
-        assert!(result.contains(&"c".to_string()));
+        // rf = 2 + 1 = 3, include b and c
+        let result =
+            select_ensemble(&units, &include(&["b", "c"]), &exclude(&["placeholder"])).unwrap();
+        assert!(result.iter().any(|u| u.address == "b"));
+        assert!(result.iter().any(|u| u.address == "c"));
         assert_eq!(result.len(), 3);
     }
 
     #[test]
-    fn previous_skips_non_writable() {
-        let mut b = unit("b", "zone-b");
+    fn include_skips_non_writable() {
+        let mut b = reg("b", "zone-b");
         b.status = UnitStatus::Readonly as i32;
-        let units = vec![
-            unit("a", "zone-a"),
-            b,
-            unit("c", "zone-c"),
-            unit("d", "zone-d"),
-        ];
-        let prev = vec!["b".into(), "c".into()];
-        let result = select_ensemble(&units, 2, &prev, &[]).unwrap();
-        assert!(!result.contains(&"b".to_string()));
-        assert!(result.contains(&"c".to_string()));
+        let units = vec![reg("a", "zone-a"), b, reg("c", "zone-c"), reg("d", "zone-d")];
+        // rf = 1 + 1 = 2, include b but b is readonly
+        let result =
+            select_ensemble(&units, &include(&["b"]), &exclude(&["placeholder"])).unwrap();
+        assert!(!result.iter().any(|u| u.address == "b"));
         assert_eq!(result.len(), 2);
     }
 
     #[test]
     fn zone_spread() {
         let units = vec![
-            unit("a1", "zone-a"),
-            unit("a2", "zone-a"),
-            unit("b1", "zone-b"),
-            unit("b2", "zone-b"),
-            unit("c1", "zone-c"),
+            reg("a1", "zone-a"),
+            reg("a2", "zone-a"),
+            reg("b1", "zone-b"),
+            reg("b2", "zone-b"),
+            reg("c1", "zone-c"),
         ];
-        let result = select_ensemble(&units, 3, &[], &[]).unwrap();
+        // rf = 0 + 3 = 3
+        let result =
+            select_ensemble(&units, &include(&[]), &exclude(&["x", "y", "z"])).unwrap();
         let zones: Vec<&str> = result
             .iter()
-            .map(|addr| {
-                let u = units.iter().find(|u| u.address == *addr).unwrap();
+            .map(|ui| {
+                let u = units.iter().find(|u| address(u) == ui.address).unwrap();
                 u.zone.as_str()
             })
             .collect();
@@ -206,64 +253,57 @@ mod tests {
     #[test]
     fn prefers_low_pressure() {
         let units = vec![
-            unit_with_load("hot", "zone-a", 0.9, 0.8, 0.5),
-            unit_with_load("cold", "zone-a", 0.1, 0.1, 0.1),
-            unit_with_load("other", "zone-b", 0.2, 0.2, 0.1),
+            reg_with_load("hot", "zone-a", 0.9, 0.8, 0.5),
+            reg_with_load("cold", "zone-a", 0.1, 0.1, 0.1),
+            reg_with_load("other", "zone-b", 0.2, 0.2, 0.1),
         ];
-        let result = select_ensemble(&units, 2, &[], &[]).unwrap();
-        assert!(result.contains(&"cold".to_string()));
-        assert!(result.contains(&"other".to_string()));
-    }
-
-    #[test]
-    fn zone_diversity_after_previous() {
-        let units = vec![
-            unit("a1", "zone-a"),
-            unit("a2", "zone-a"),
-            unit("a3", "zone-a"),
-            unit("b1", "zone-b"),
-        ];
-        let prev = vec!["a1".into(), "a2".into()];
-        let result = select_ensemble(&units, 3, &prev, &[]).unwrap();
-        assert!(result.contains(&"a1".to_string()));
-        assert!(result.contains(&"a2".to_string()));
-        assert!(result.contains(&"b1".to_string()));
+        // rf = 0 + 2 = 2
+        let result =
+            select_ensemble(&units, &include(&[]), &exclude(&["x", "y"])).unwrap();
+        assert!(result.iter().any(|u| u.address == "cold"));
+        assert!(result.iter().any(|u| u.address == "other"));
     }
 
     #[test]
     fn respects_exclude() {
         let units = vec![
-            unit("a", "zone-a"),
-            unit("b", "zone-b"),
-            unit("c", "zone-c"),
+            reg("a", "zone-a"),
+            reg("b", "zone-b"),
+            reg("c", "zone-c"),
         ];
-        let result = select_ensemble(&units, 2, &[], &["a".into()]).unwrap();
-        assert!(!result.contains(&"a".to_string()));
+        // rf = 0 + 2 = 2, exclude "a"
+        let result =
+            select_ensemble(&units, &include(&[]), &exclude(&["a", "placeholder"])).unwrap();
+        assert!(!result.iter().any(|u| u.address == "a"));
         assert_eq!(result.len(), 2);
     }
 
     #[test]
     fn insufficient_units() {
-        let units = vec![unit("a", "zone-a")];
-        assert!(select_ensemble(&units, 2, &[], &[]).is_none());
+        let units = vec![reg("a", "zone-a")];
+        // rf = 0 + 2 = 2, only 1 unit
+        assert!(select_ensemble(&units, &include(&[]), &exclude(&["x", "y"])).is_none());
     }
 
     #[test]
     fn skips_non_writable() {
-        let mut u = unit("a", "zone-a");
+        let mut u = reg("a", "zone-a");
         u.status = UnitStatus::Readonly as i32;
-        let units = vec![u, unit("b", "zone-b")];
-        assert!(select_ensemble(&units, 2, &[], &[]).is_none());
+        let units = vec![u, reg("b", "zone-b")];
+        // rf = 0 + 2 = 2
+        assert!(select_ensemble(&units, &include(&[]), &exclude(&["x", "y"])).is_none());
     }
 
     #[test]
     fn single_zone_fallback() {
         let units = vec![
-            unit("a", "zone-a"),
-            unit("b", "zone-a"),
-            unit("c", "zone-a"),
+            reg("a", "zone-a"),
+            reg("b", "zone-a"),
+            reg("c", "zone-a"),
         ];
-        let result = select_ensemble(&units, 3, &[], &[]).unwrap();
+        // rf = 0 + 3 = 3
+        let result =
+            select_ensemble(&units, &include(&[]), &exclude(&["x", "y", "z"])).unwrap();
         assert_eq!(result.len(), 3);
     }
 }
