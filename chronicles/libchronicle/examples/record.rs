@@ -1,5 +1,5 @@
 use libchronicle::chronicle::{Chronicle, ChronicleOptions};
-use libchronicle::{Event, TimelineOptions, Writer};
+use libchronicle::{Event, TimelineOptions};
 use std::sync::Arc;
 
 #[tokio::main]

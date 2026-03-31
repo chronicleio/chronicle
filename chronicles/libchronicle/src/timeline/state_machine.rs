@@ -1,6 +1,6 @@
 use super::ensemble::select_ensemble;
 use crate::conn::conn_pool::ConnPool;
-use crate::conn::Watermark;
+use crate::conn::WatermarkValue;
 use crate::error::ChronicleError;
 use crate::error_inner::InnerError;
 use crate::{Event as UserEvent, Offset, TimelineOptions};
@@ -10,11 +10,11 @@ use chronicle_proto::pb_catalog::{TimelineMeta, UnitInfo};
 use chronicle_proto::pb_ext::{
     FenceResponse, RecordEventsRequest, RecordEventsRequestItem, StatusCode,
 };
-use futures_util::future::join_all;
+use futures_util::future::{join_all, select_all};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
@@ -71,15 +71,12 @@ impl StateMachine {
         let linger = options.linger;
         let cancel = CancellationToken::new();
         let (record_tx, record_rx) = mpsc::channel::<RecordRequest>(options.max_inflight);
-        let (wm_tx, wm_rx) = mpsc::channel::<Watermark>(256);
         let (ready_tx, ready_rx) = oneshot::channel();
 
         let task = tokio::spawn(run(
             state,
             ready_tx,
             record_rx,
-            wm_tx,
-            wm_rx,
             cancel.clone(),
             max_batch_size,
             linger,
@@ -113,10 +110,7 @@ impl StateMachine {
     }
 }
 
-async fn init(
-    state: &mut State,
-    wm_tx: &mpsc::Sender<Watermark>,
-) -> Result<(), ChronicleError> {
+async fn init(state: &mut State) -> Result<Vec<(String, watch::Receiver<WatermarkValue>)>, ChronicleError> {
     state.meta = state
         .catalog
         .tl_new_term(&state.name)
@@ -145,10 +139,32 @@ async fn init(
     info!(
         timeline_id = state.meta.timeline_id,
         term = state.meta.term,
-        "new term: fencing ensemble"
+        "fencing ensemble"
     );
 
+    let wm_watches = fence_and_watch(state).await?;
+
+    info!(
+        timeline_id = state.meta.timeline_id,
+        term = state.meta.term,
+        lra = state.meta.lra,
+        "complete"
+    );
+
+    Ok(wm_watches)
+}
+
+async fn fence_and_watch(
+    state: &mut State,
+) -> Result<Vec<(String, watch::Receiver<WatermarkValue>)>, ChronicleError> {
     let ensemble = state.ensemble.clone();
+
+    info!(
+        timeline_id = state.meta.timeline_id,
+        term = state.meta.term,
+        "fencing ensemble"
+    );
+
     let lra = fence_ensemble(state, &ensemble)
         .await
         .map_err(|e| ChronicleError::Internal(e.to_string()))?;
@@ -164,37 +180,33 @@ async fn init(
     }
     state.needs_trunc = lra > 0;
 
+    let mut wm_watches = Vec::new();
     for unit in &state.ensemble {
         state.unit_committed.insert(unit.address.clone(), lra);
         if let Ok(conn) = state.pool.get_or_connect(&unit.address) {
-            conn.subscribe_watermark(state.meta.timeline_id, wm_tx.clone());
+            let rx = conn.subscribe_watermark(state.meta.timeline_id, lra);
+            wm_watches.push((unit.address.clone(), rx));
         }
     }
 
-    info!(
-        timeline_id = state.meta.timeline_id,
-        term = state.meta.term,
-        lra = lra,
-        "new term: complete"
-    );
-
-    Ok(())
+    Ok(wm_watches)
 }
 
 async fn run(
     mut state: State,
     ready_tx: oneshot::Sender<Result<TimelineMeta, ChronicleError>>,
     mut record_rx: mpsc::Receiver<RecordRequest>,
-    wm_tx: mpsc::Sender<Watermark>,
-    mut wm_rx: mpsc::Receiver<Watermark>,
     cancel: CancellationToken,
     max_batch_size: usize,
     linger: Duration,
 ) {
-    if let Err(e) = init(&mut state, &wm_tx).await {
-        let _ = ready_tx.send(Err(e));
-        return;
-    }
+    let mut wm_watches = match init(&mut state).await {
+        Ok(watches) => watches,
+        Err(e) => {
+            let _ = ready_tx.send(Err(e));
+            return;
+        }
+    };
     let _ = ready_tx.send(Ok(state.meta.clone()));
 
     let mut batch: Vec<RecordRequest> = Vec::with_capacity(max_batch_size);
@@ -211,13 +223,15 @@ async fn run(
                 if !batch.is_empty() {
                     flush_batch(&mut state, &mut batch, &mut inflight).await;
                 }
-                drain_remaining(&mut state, &mut inflight, &mut wm_rx).await;
+                drain_inflight_via_watches(&mut state, &mut inflight, &mut wm_watches).await;
                 return;
             }
 
-            wm = wm_rx.recv() => {
-                match wm {
-                    Some(wm) => process_watermark(&mut state, &mut inflight, wm),
+            result = wait_any_watermark(&mut wm_watches) => {
+                match result {
+                    Some((endpoint, value)) => {
+                        process_watermark(&mut state, &mut inflight, &endpoint, value);
+                    }
                     None => break,
                 }
             }
@@ -243,7 +257,7 @@ async fn run(
                         if !batch.is_empty() {
                             flush_batch(&mut state, &mut batch, &mut inflight).await;
                         }
-                        drain_remaining(&mut state, &mut inflight, &mut wm_rx).await;
+                        drain_inflight_via_watches(&mut state, &mut inflight, &mut wm_watches).await;
                         return;
                     }
                 }
@@ -257,6 +271,34 @@ async fn run(
                 linger_active = false;
             }
         }
+    }
+}
+
+async fn wait_any_watermark(
+    watches: &mut [(String, watch::Receiver<WatermarkValue>)],
+) -> Option<(String, WatermarkValue)> {
+    if watches.is_empty() {
+        return std::future::pending().await;
+    }
+    let futs: Vec<_> = watches
+        .iter_mut()
+        .enumerate()
+        .map(|(i, (_, rx))| {
+            Box::pin(async move {
+                let result = rx.changed().await;
+                (i, result)
+            })
+        })
+        .collect();
+
+    let ((idx, result), _, _) = select_all(futs).await;
+
+    match result {
+        Ok(()) => {
+            let (ref endpoint, ref rx) = watches[idx];
+            Some((endpoint.clone(), rx.borrow().clone()))
+        }
+        Err(_) => None,
     }
 }
 
@@ -450,34 +492,32 @@ async fn flush_batch(
 fn process_watermark(
     state: &mut State,
     inflight: &mut VecDeque<InflightBatch>,
-    wm: Watermark,
+    endpoint: &str,
+    value: WatermarkValue,
 ) {
-    match wm.result {
-        Ok(resp) => {
-            if resp.code == StatusCode::Ok as i32 {
-                state.unit_committed.insert(wm.endpoint, resp.commit_offset);
-                drain_resolved(state, inflight);
-            } else if resp.code == StatusCode::Fenced as i32 {
-                fail_all_inflight(
-                    inflight,
-                    ChronicleError::Fenced {
-                        timeline_id: resp.timeline_id,
-                        term: resp.term,
-                    },
-                );
-            } else {
-                fail_all_inflight(
-                    inflight,
-                    ChronicleError::InvalidTerm {
-                        current: resp.term,
-                        requested: state.meta.term,
-                    },
-                );
-            }
+    match value {
+        WatermarkValue::Offset(commit_offset) => {
+            state.unit_committed.insert(endpoint.to_string(), commit_offset);
+            drain_resolved(state, inflight);
         }
-        Err(e) => {
-            warn!(endpoint = %wm.endpoint, error = %e, "unit stream error");
-            fail_all_inflight(inflight, e);
+        WatermarkValue::Fenced { timeline_id, term } => {
+            fail_all_inflight(
+                inflight,
+                ChronicleError::Fenced { timeline_id, term },
+            );
+        }
+        WatermarkValue::InvalidTerm { current, requested } => {
+            fail_all_inflight(
+                inflight,
+                ChronicleError::InvalidTerm {
+                    current,
+                    requested: if requested == 0 { state.meta.term } else { requested },
+                },
+            );
+        }
+        WatermarkValue::Error(msg) => {
+            warn!(endpoint = %endpoint, error = %msg, "unit stream error");
+            fail_all_inflight(inflight, ChronicleError::Transport(msg));
         }
     }
 }
@@ -507,18 +547,18 @@ fn fail_all_inflight(inflight: &mut VecDeque<InflightBatch>, error: ChronicleErr
     }
 }
 
-async fn drain_remaining(
+async fn drain_inflight_via_watches(
     state: &mut State,
     inflight: &mut VecDeque<InflightBatch>,
-    wm_rx: &mut mpsc::Receiver<Watermark>,
+    wm_watches: &mut Vec<(String, watch::Receiver<WatermarkValue>)>,
 ) {
     while !inflight.is_empty() {
-        match wm_rx.recv().await {
-            Some(wm) => process_watermark(state, inflight, wm),
+        match wait_any_watermark(wm_watches).await {
+            Some((endpoint, value)) => process_watermark(state, inflight, &endpoint, value),
             None => {
                 fail_all_inflight(
                     inflight,
-                    ChronicleError::Internal("watermark channel closed".into()),
+                    ChronicleError::Internal("all watermark watches closed".into()),
                 );
                 break;
             }
