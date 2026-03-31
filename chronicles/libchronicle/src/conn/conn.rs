@@ -43,17 +43,6 @@ impl Default for ConnOptions {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Watermark — per-unit commit offset published via watch
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, Debug)]
-pub enum WatermarkValue {
-    Offset(i64),
-    Fenced { timeline_id: i64, term: i64 },
-    InvalidTerm { current: i64, requested: i64 },
-    Error(String),
-}
 
 // ---------------------------------------------------------------------------
 // Conn — one logical connection with its own record and fetch streams
@@ -65,7 +54,7 @@ pub struct Conn {
     client: ChronicleClient<Channel>,
     record_stream: RecoverableStream<RecordEventsRequest>,
     fetch_stream: RecoverableStream<FetchEventsRequest>,
-    wm_subscribers: Arc<DashMap<i64, watch::Sender<WatermarkValue>>>,
+    wm_subscribers: Arc<DashMap<i64, watch::Sender<i64>>>,
     fetch_subscribers: Arc<DashMap<i64, mpsc::Sender<Result<FetchEventsResponse, ChronicleError>>>>,
 }
 
@@ -136,8 +125,8 @@ impl Conn {
 
     // -- watermark subscribers ------------------------------------------------
 
-    pub fn subscribe_watermark(&self, timeline_id: i64, initial: i64) -> watch::Receiver<WatermarkValue> {
-        let (tx, rx) = watch::channel(WatermarkValue::Offset(initial));
+    pub fn subscribe_watermark(&self, timeline_id: i64, initial: i64) -> watch::Receiver<i64> {
+        let (tx, rx) = watch::channel(initial);
         self.wm_subscribers.insert(timeline_id, tx);
         rx
     }
@@ -223,27 +212,22 @@ impl Drop for FetchStream {
 async fn record_response_reader(
     endpoint: String,
     mut stream: tonic::Streaming<RecordEventsResponse>,
-    subscribers: Arc<DashMap<i64, watch::Sender<WatermarkValue>>>,
+    subscribers: Arc<DashMap<i64, watch::Sender<i64>>>,
 ) {
     let reason = loop {
         match stream.message().await {
             Ok(Some(resp)) => {
-                let timeline_id = resp.timeline_id;
-                if let Some(tx) = subscribers.get(&timeline_id) {
-                    let value = if resp.code == StatusCode::Ok as i32 {
-                        WatermarkValue::Offset(resp.commit_offset)
-                    } else if resp.code == StatusCode::Fenced as i32 {
-                        WatermarkValue::Fenced {
-                            timeline_id: resp.timeline_id,
-                            term: resp.term,
-                        }
-                    } else {
-                        WatermarkValue::InvalidTerm {
-                            current: resp.term,
-                            requested: 0,
-                        }
-                    };
-                    let _ = tx.send(value);
+                if resp.code == StatusCode::Ok as i32 {
+                    if let Some(tx) = subscribers.get(&resp.timeline_id) {
+                        let _ = tx.send(resp.commit_offset);
+                    }
+                } else {
+                    warn!(
+                        endpoint = %endpoint,
+                        timeline_id = resp.timeline_id,
+                        code = resp.code,
+                        "record_response_reader: non-ok response"
+                    );
                 }
             }
             Ok(None) => break "stream ended".to_string(),
@@ -253,9 +237,6 @@ async fn record_response_reader(
             }
         }
     };
-    for entry in subscribers.iter() {
-        let _ = entry.value().send(WatermarkValue::Error(reason.clone()));
-    }
     warn!(endpoint = %endpoint, reason = %reason, "record_response_reader: ended");
 }
 

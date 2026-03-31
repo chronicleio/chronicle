@@ -30,6 +30,9 @@ pub enum ChronicleError {
 
     #[error("Internal error: {0}")]
     Internal(String),
+
+    #[error("Canceled")]
+    Canceled,
 }
 
 impl From<tonic::Status> for ChronicleError {

@@ -17,6 +17,9 @@ pub enum InnerError {
 
     #[error("Unit not enough: {0}")]
     UnitNotEnough(String),
+
+    #[error("Canceled")]
+    Canceled,
 }
 
 impl From<tonic::Status> for InnerError {
