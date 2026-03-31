@@ -13,6 +13,8 @@ use futures_util::future::{join_all, select_all};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use task::JoinHandle;
+use tokio::{sync, task};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -42,10 +44,15 @@ struct InflightBatch {
     callbacks: Vec<(i64, oneshot::Sender<Result<Offset, ChronicleError>>)>,
 }
 
-pub(crate) struct StateMachine {
+struct StateMachineInner {
     record_tx: mpsc::Sender<RecordRequest>,
     cancel: CancellationToken,
-    task: tokio::task::JoinHandle<()>,
+    task: sync::Mutex<Option<JoinHandle<()>>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct StateMachine {
+    inner: Arc<StateMachineInner>,
 }
 
 impl StateMachine {
@@ -89,9 +96,11 @@ impl StateMachine {
 
         Ok((
             Self {
-                record_tx,
-                cancel,
-                task,
+                inner: Arc::new(StateMachineInner {
+                    record_tx,
+                    cancel,
+                    task: sync::Mutex::new(Some(task)),
+                }),
             },
             meta,
         ))
@@ -99,7 +108,8 @@ impl StateMachine {
 
     pub async fn record(&self, event: UserEvent) -> Result<Offset, ChronicleError> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.record_tx
+        self.inner
+            .record_tx
             .send(RecordRequest {
                 event,
                 reply: reply_tx,
@@ -111,10 +121,11 @@ impl StateMachine {
             .map_err(|_| ChronicleError::Internal("state machine dropped".into()))?
     }
 
-    pub async fn stop(self) {
-        self.cancel.cancel();
-        drop(self.record_tx);
-        let _ = self.task.await;
+    pub async fn stop(&self) {
+        self.inner.cancel.cancel();
+        if let Some(task) = self.inner.task.lock().await.take() {
+            let _ = task.await;
+        }
     }
 }
 

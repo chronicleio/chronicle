@@ -7,7 +7,7 @@ use catalog::Catalog;
 use std::sync::Arc;
 use tracing::info;
 
-pub struct Timeline {
+struct TimelineInner {
     timeline_id: i64,
     timeline_name: String,
     catalog: Arc<Catalog>,
@@ -15,6 +15,11 @@ pub struct Timeline {
     #[allow(dead_code)]
     options: TimelineOptions,
     state_machine: Option<StateMachine>,
+}
+
+#[derive(Clone)]
+pub struct Timeline {
+    inner: Arc<TimelineInner>,
 }
 
 impl Timeline {
@@ -33,12 +38,14 @@ impl Timeline {
         );
 
         Ok(Self {
-            timeline_id: meta.timeline_id,
-            timeline_name: name.to_string(),
-            catalog,
-            pool,
-            options,
-            state_machine: Some(sm),
+            inner: Arc::new(TimelineInner {
+                timeline_id: meta.timeline_id,
+                timeline_name: name.to_string(),
+                catalog,
+                pool,
+                options,
+                state_machine: Some(sm),
+            }),
         })
     }
 
@@ -60,17 +67,24 @@ impl Timeline {
         );
 
         Ok(Self {
-            timeline_id: tc.timeline_id,
-            timeline_name: name.to_string(),
-            catalog,
-            pool,
-            options,
-            state_machine: None,
+            inner: Arc::new(TimelineInner {
+                timeline_id: tc.timeline_id,
+                timeline_name: name.to_string(),
+                catalog,
+                pool,
+                options,
+                state_machine: None,
+            }),
         })
+    }
+
+    pub fn timeline_id(&self) -> i64 {
+        self.inner.timeline_id
     }
 
     pub async fn record(&self, event: UserEvent) -> Result<Offset, ChronicleError> {
         let sm = self
+            .inner
             .state_machine
             .as_ref()
             .ok_or_else(|| ChronicleError::Internal("timeline is read-only".into()))?;
@@ -82,8 +96,9 @@ impl Timeline {
             StartPosition::Earliest => 0,
             StartPosition::Latest => {
                 let tc = self
+                    .inner
                     .catalog
-                    .get_timeline(&self.timeline_name)
+                    .get_timeline(&self.inner.timeline_name)
                     .await
                     .map_err(|e| {
                         ChronicleError::Internal(format!("failed to get timeline: {}", e))
@@ -99,10 +114,10 @@ impl Timeline {
         };
 
         let mut stream = EventStream::new(
-            self.timeline_id,
-            self.timeline_name.clone(),
-            self.catalog.clone(),
-            self.pool.clone(),
+            self.inner.timeline_id,
+            self.inner.timeline_name.clone(),
+            self.inner.catalog.clone(),
+            self.inner.pool.clone(),
             start_offset,
         );
 
@@ -119,10 +134,10 @@ impl Timeline {
         Ok(stream)
     }
 
-    pub async fn close(&mut self) {
-        if let Some(sm) = self.state_machine.take() {
+    pub async fn close(&self) {
+        if let Some(sm) = &self.inner.state_machine {
             sm.stop().await;
         }
-        info!(timeline_id = self.timeline_id, "timeline closed");
+        info!(timeline_id = self.inner.timeline_id, "timeline closed");
     }
 }
