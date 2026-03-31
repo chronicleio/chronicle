@@ -16,7 +16,7 @@ use crate::unit::unit_service::UnitService;
 use crate::wal::checkpoint;
 use crate::wal::wal::{Wal, WalOptions};
 use catalog::Catalog;
-use chronicle_proto::pb_catalog::{UnitRegistration, UnitStatus};
+use chronicle_proto::pb_catalog::{UnitInfo, UnitRegistration, UnitStatus};
 use chronicle_proto::pb_ext::Event;
 use chronicle_proto::pb_admin::admin_server::AdminServer;
 use chronicle_proto::pb_ext::chronicle_server::ChronicleServer;
@@ -226,7 +226,10 @@ impl Unit {
         );
 
         let registration = UnitRegistration {
-            address: address.clone(),
+            unit: Some(UnitInfo {
+                id: address.clone(),
+                address: address.clone(),
+            }),
             status: UnitStatus::Writable.into(),
             zone: options.server.zone.clone(),
             cpu_usage: 0.0,
@@ -421,7 +424,10 @@ async fn report_load(
     };
 
     let reg = UnitRegistration {
-        address: address.to_string(),
+        unit: Some(UnitInfo {
+            id: address.to_string(),
+            address: address.to_string(),
+        }),
         status: status.into(),
         zone: zone.to_string(),
         cpu_usage,

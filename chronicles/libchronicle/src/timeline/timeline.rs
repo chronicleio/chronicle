@@ -1,32 +1,25 @@
-use std::cell::RefCell;
 use super::cursor::EventStream;
 use super::ensemble::select_ensemble;
 use crate::conn::conn_pool::ConnPool;
 use crate::conn::{Conn, Watermark};
 use crate::error::ChronicleError;
 use crate::error_inner::InnerError;
-use crate::{
-    Event as UserEvent, FetchOptions, Offset, StartPosition, TimelineMode, TimelineOptions,
-};
+use crate::{Event as UserEvent, FetchOptions, Offset, StartPosition, TimelineOptions};
 use backoff::future;
-use catalog::Catalog;
+use catalog::{Catalog, Versioned};
 use chronicle_proto::pb_catalog::{Segment, TimelineMeta, UnitInfo};
 use chronicle_proto::pb_ext::{
     FenceResponse, RecordEventsRequest, RecordEventsRequestItem, StatusCode,
 };
 use futures_util::future::join_all;
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{RwLock, mpsc, oneshot};
 use tokio::time::Instant;
 use tracing::{info, warn};
 
-const QUARANTINE_BASE_BACKOFF: Duration = Duration::from_millis(500);
-
-// ---------------------------------------------------------------------------
-// Mode
-// ---------------------------------------------------------------------------
+const EMPTY_UNITS: VecDeque<UnitInfo> = VecDeque::new();
 
 enum Mode {
     ReadWrite {
@@ -68,7 +61,6 @@ struct PendingEvent {
 // ---------------------------------------------------------------------------
 
 pub struct Timeline {
-    mode: Mode,
     #[allow(dead_code)]
     options: TimelineOptions,
     catalog: Arc<Catalog>,
@@ -84,7 +76,7 @@ impl Timeline {
         ensemble: &[UnitInfo],
     ) -> Result<i64, InnerError> {
         let mut lra = 0i64;
-        let quarantined_candidates = RefCell::new(VecDeque::new());
+        let quarantined_candidates = Mutex::new(VecDeque::new());
         let mut fenced_candidates: VecDeque<UnitInfo> = VecDeque::new();
         let mut ensemble_candidates = ensemble.to_vec();
 
@@ -108,7 +100,7 @@ impl Timeline {
                     }
                     Err(e) => {
                         warn!(unit = ?unit, error = %e, "fence failed, quarantining unit");
-                        quarantined_candidates.borrow_mut().push_back(unit)
+                        quarantined_candidates.lock().unwrap().push_back(unit)
                     }
                 }
             }
@@ -126,21 +118,21 @@ impl Timeline {
                             self.catalog.list_writable_units().await.map_err(|error| {
                                 backoff::Error::transient(InnerError::Catalog(error))
                             })?;
-                        let quarantined_candidates_ref = quarantined_candidates.borrow();
-                        match select_ensemble(&candidates, &fenced_candidates, &quarantined_candidates_ref) {
+                        let quarantined = quarantined_candidates.lock().unwrap();
+                        match select_ensemble(&candidates, &fenced_candidates, &quarantined) {
                             None => {
-                                if quarantined_candidates_ref.is_empty() {
-                                    return Err(backoff::Error::transient(InnerError::UnitNotEnough(
-                                        "not enough candidates for ensemble".into(),
-                                    )))
+                                if quarantined.is_empty() {
+                                    return Err(backoff::Error::transient(
+                                        InnerError::UnitNotEnough(
+                                            "not enough candidates for ensemble".into(),
+                                        ),
+                                    ));
                                 }
-                                drop(quarantined_candidates_ref);
-                                quarantined_candidates.borrow_mut().pop_front();
-                                continue
+                                drop(quarantined);
+                                quarantined_candidates.lock().unwrap().pop_front();
+                                continue;
                             }
-                            Some(ensemble) => {
-                                return Ok(ensemble)
-                            }
+                            Some(ensemble) => return Ok(ensemble),
                         }
                     }
                 },
@@ -162,128 +154,78 @@ impl Timeline {
         name: &str,
         options: TimelineOptions,
     ) -> Result<Self, ChronicleError> {
-        let tc = match &options.mode {
-            TimelineMode::ReadWrite { .. } => catalog.tl_new_term(name).await?,
-            TimelineMode::ReadOnly => catalog
-                .get_timeline(name)
-                .await
-                .map_err(|_| ChronicleError::TimelineNotFound(name.to_string()))?,
+        let tc = catalog.tl_new_term(name).await?;
+
+        let writable_segment = catalog
+            .timeline_get_or_init_last_segment(&tc.name, || async move {
+                let units = &catalog.list_writable_units().await?;
+                let ensemble =
+                    select_ensemble(&units, &EMPTY_UNITS, &EMPTY_UNITS).ok_or_else(|| {
+                        catalog::error::CatalogError::NotFound(format!(
+                            "need {} writable units, have {}",
+                            options.replication_factor.clone(),
+                            units.len()
+                        ))
+                    })?;
+                Ok(ensemble)
+            })
+            .await
+            .map_err(|e| ChronicleError::UnitNotEnough(e.to_string()))?;
+
+        let ensemble = writable_segment.value.ensemble.clone();
+        info!(
+            timeline_id = tc.timeline_id,
+            term = tc.term,
+            "new term: fencing ensemble"
+        );
+        let mut tl = Timeline {
+            options,
+            catalog,
+            pool,
+            meta: tc,
+            writable_segment,
+        };
+        let lra = tl
+            .fence_ensemble(tc.timeline_id, tc.term, &ensemble)
+            .await
+            .map_err(|e| ChronicleError::Internal(e.to_string()))?;
+        if tl.meta.lra != lra {
+            tl.meta.lra = lra;
+            tl.meta = catalog.timeline_update(&tl.meta, tc.version).await?;
+        }
+        info!(
+            timeline_id = tc.timeline_id,
+            term = tc.term,
+            lra = lra,
+            "new term: complete"
+        );
+
+        for unit in &ensemble {
+            let conn = pool
+                .get_or_connect(&unit.address)
+                .map_err(|e| ChronicleError::Transport(e.to_string()))?;
+            conn.subscribe_watermark(tc.timeline_id, wm_tx.clone());
+            conns.insert(unit.address.clone(), conn);
+        }
+
+        let unit_committed: HashMap<String, i64> =
+            conns.keys().map(|ep| (ep.clone(), lra)).collect();
+
+        let state = LoopState {
+            timeline_id: tc.timeline_id,
+            term: tc.term,
+            lrs: lra,
+            lra,
+            needs_trunc,
+            catalog: catalog.clone(),
+            pool: pool.clone(),
+            timeline_name: name.to_string(),
+            conns,
+            unit_committed,
         };
 
-        let mode = match &options.mode {
-            TimelineMode::ReadWrite {
-                replication_factor,
-                max_batch_size,
-                linger,
-                ..
-            } => {
-                let rf = *replication_factor;
-                let max_batch_size = *max_batch_size;
-                let linger = *linger;
-                let catalog_ref = &catalog;
-                let empty_include: VecDeque<UnitInfo> = VecDeque::new();
-                // Build a dummy exclude list of rf size to set the target ensemble size.
-                let dummy_exclude: VecDeque<UnitInfo> = (0..rf)
-                    .map(|i| UnitInfo {
-                        id: format!("__placeholder_{i}"),
-                        address: format!("__placeholder_{i}"),
-                    })
-                    .collect();
-                let writable_seg = catalog
-                    .tl_fetch_or_insert_w_seg(&tc.name, || async move {
-                        let units = catalog_ref.list_writable_units().await?;
-                        let ensemble =
-                            select_ensemble(&units, &empty_include, &dummy_exclude)
-                                .ok_or_else(|| {
-                                    catalog::error::CatalogError::NotFound(format!(
-                                        "need {} writable units, have {}",
-                                        rf,
-                                        units.len()
-                                    ))
-                                })?;
-                        Ok(ensemble.into_iter().map(|u| u.address).collect())
-                    })
-                    .await
-                    .map_err(|e| ChronicleError::UnitNotEnough(e.to_string()))?;
-                let ensemble: Vec<UnitInfo> = writable_seg
-                    .value
-                    .ensemble
-                    .iter()
-                    .map(|addr| UnitInfo {
-                        id: addr.clone(),
-                        address: addr.clone(),
-                    })
-                    .collect();
-
-                info!(
-                    timeline_id = tc.timeline_id,
-                    term = tc.term,
-                    "new term: fencing ensemble"
-                );
-
-                // Build a temporary Timeline to call fence_ensemble.
-                let tmp = Timeline {
-                    mode: Mode::ReadOnly,
-                    options: options.clone(),
-                    catalog: catalog.clone(),
-                    pool: pool.clone(),
-                    meta: tc.clone(),
-                };
-                let lra = tmp
-                    .fence_ensemble(tc.timeline_id, tc.term, &ensemble)
-                    .await?;
-
-                let needs_trunc = lra > 0;
-
-                let mut updated = tc.clone();
-                updated.lra = lra;
-                let _updated = catalog.put_timeline(&updated, tc.version).await?;
-
-                info!(
-                    timeline_id = tc.timeline_id,
-                    term = tc.term,
-                    lra = lra,
-                    "new term: complete"
-                );
-
-                // Get conns from pool and subscribe watermarks.
-                let (wm_tx, wm_rx) = mpsc::channel::<Watermark>(256);
-                let mut conns = HashMap::new();
-                for unit in &ensemble {
-                    let conn = pool
-                        .get_or_connect(&unit.address)
-                        .map_err(|e| ChronicleError::Transport(e.to_string()))?;
-                    conn.subscribe_watermark(tc.timeline_id, wm_tx.clone());
-                    conns.insert(unit.address.clone(), conn);
-                }
-
-                let unit_committed: HashMap<String, i64> =
-                    conns.keys().map(|ep| (ep.clone(), lra)).collect();
-
-                let state = LoopState {
-                    timeline_id: tc.timeline_id,
-                    term: tc.term,
-                    lrs: lra,
-                    lra,
-                    needs_trunc,
-                    catalog: catalog.clone(),
-                    pool: pool.clone(),
-                    timeline_name: name.to_string(),
-                    conns,
-                    unit_committed,
-                };
-
-                let (event_tx, event_rx) = mpsc::channel::<PendingEvent>(max_batch_size * 2);
-                let loop_task =
-                    tokio::spawn(event_loop(state, event_rx, wm_rx, max_batch_size, linger));
-
-                Mode::ReadWrite {
-                    event_tx: Some(event_tx),
-                    loop_task: Some(loop_task),
-                }
-            }
-            TimelineMode::ReadOnly => Mode::ReadOnly,
-        };
+        let (event_tx, event_rx) = mpsc::channel::<PendingEvent>(max_batch_size * 2);
+        let loop_task = tokio::spawn(event_loop(state, event_rx, wm_rx, max_batch_size, linger));
 
         info!(
             timeline_id = tc.timeline_id,
@@ -292,7 +234,36 @@ impl Timeline {
         );
 
         Ok(Self {
-            mode,
+            mode: Mode::ReadWrite {
+                event_tx: Some(event_tx),
+                loop_task: Some(loop_task),
+            },
+            meta: tc,
+            options,
+            catalog,
+            pool,
+        })
+    }
+
+    pub async fn open_readonly(
+        catalog: Arc<Catalog>,
+        pool: Arc<ConnPool>,
+        name: &str,
+        options: TimelineOptions,
+    ) -> Result<Self, ChronicleError> {
+        let tc = catalog
+            .get_timeline(name)
+            .await
+            .map_err(|_| ChronicleError::TimelineNotFound(name.to_string()))?;
+
+        info!(
+            timeline_id = tc.timeline_id,
+            timeline = %name,
+            "timeline opened (readonly)"
+        );
+
+        Ok(Self {
+            mode: Mode::ReadOnly,
             meta: tc,
             options,
             catalog,

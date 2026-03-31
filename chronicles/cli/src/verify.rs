@@ -1,7 +1,7 @@
 use libchronicle::chronicle::{Chronicle, ChronicleOptions};
 use libchronicle::TimelineOptions;
 use futures_util::StreamExt;
-use libchronicle::{Event, FetchOptions, TimelineMode};
+use libchronicle::{Event, FetchOptions};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -183,7 +183,8 @@ pub async fn run(args: VerifyArgs) -> Result<(), Box<dyn std::error::Error>> {
         Ok(units) => {
             info!(count = units.len(), "units found in catalog");
             for u in &units {
-                info!(address = %u.address, status = ?u.status(), "unit");
+                let addr = u.unit.as_ref().map(|ui| ui.address.as_str()).unwrap_or("unknown");
+                info!(address = %addr, status = ?u.status(), "unit");
             }
         }
         Err(e) => warn!(error = %e, "failed to list units from catalog (non-fatal)"),
@@ -222,21 +223,17 @@ pub async fn run(args: VerifyArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut timelines = Vec::new();
     for i in 0..args.timelines {
         let name = format!("verify-{}", i);
-        let timeline = match chronicle.open_timeline(&name, TimelineOptions::new().mode(TimelineMode::ReadWrite {
-                replication_factor: args.replication_factor,
-                schema_id: None,
-                max_batch_size: 256,
-                linger: Duration::from_millis(5),
-            })).await {
+        let timeline = match chronicle.open_timeline(&name, TimelineOptions::new()
+                .replication_factor(args.replication_factor)
+                .max_batch_size(256)
+                .linger(Duration::from_millis(5))).await {
             Ok(t) => t,
             Err(create_err) => {
                 info!(timeline = name, error = %create_err, "create failed, trying open");
-                match chronicle.open_timeline(&name, TimelineOptions::new().mode(TimelineMode::ReadWrite {
-                replication_factor: args.replication_factor,
-                schema_id: None,
-                max_batch_size: 256,
-                linger: Duration::from_millis(5),
-            })).await {
+                match chronicle.open_timeline(&name, TimelineOptions::new()
+                .replication_factor(args.replication_factor)
+                .max_batch_size(256)
+                .linger(Duration::from_millis(5))).await {
                     Ok(t) => t,
                     Err(e) => {
                         error!(timeline = name, create_error = %create_err, open_error = %e, "failed to create/open timeline");
@@ -308,12 +305,10 @@ pub async fn run(args: VerifyArgs) -> Result<(), Box<dyn std::error::Error>> {
             let name = format!("verify-{}", i);
 
             let mut stream = loop {
-                match chronicle.open_timeline(&name, TimelineOptions::new().mode(TimelineMode::ReadWrite {
-                replication_factor: args.replication_factor,
-                schema_id: None,
-                max_batch_size: 256,
-                linger: Duration::from_millis(5),
-            })).await {
+                match chronicle.open_timeline(&name, TimelineOptions::new()
+                .replication_factor(args.replication_factor)
+                .max_batch_size(256)
+                .linger(Duration::from_millis(5))).await {
                     Ok(t) => break t.fetch(FetchOptions::earliest()).await.unwrap(),
                     Err(_) => {
                         tokio::time::sleep(Duration::from_secs(1)).await;

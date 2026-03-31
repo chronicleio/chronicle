@@ -1,8 +1,8 @@
+use crate::TimelineOptions;
 use crate::conn::ConnOptions;
 use crate::conn::conn_pool::ConnPool;
 use crate::error::ChronicleError;
 use crate::timeline::Timeline;
-use crate::TimelineOptions;
 use catalog::Catalog;
 use opentelemetry::metrics::Meter;
 use std::sync::Arc;
@@ -65,24 +65,27 @@ pub struct Chronicle {
 }
 
 impl Chronicle {
-    pub fn new(
-        catalog: Arc<Catalog>,
-        options: ChronicleOptions,
-    ) -> Self {
+    pub fn new(catalog: Arc<Catalog>, options: ChronicleOptions) -> Self {
         Self {
             pool: Arc::new(ConnPool::new(options.conn_opts.clone())),
             catalog,
         }
     }
 
-    pub async fn open_timeline(&self, name: &str, options: TimelineOptions) -> Result<Timeline, ChronicleError> {
-        Timeline::open(
-            self.catalog.clone(),
-            self.pool.clone(),
-            name,
-            options,
-        )
-        .await
+    pub async fn open_timeline(
+        &self,
+        name: &str,
+        options: TimelineOptions,
+    ) -> Result<Timeline, ChronicleError> {
+        Timeline::open(self.catalog.clone(), self.pool.clone(), name, options).await
+    }
+
+    pub async fn open_readonly_timeline(
+        &self,
+        name: &str,
+        options: TimelineOptions,
+    ) -> Result<Timeline, ChronicleError> {
+        Timeline::open_readonly(self.catalog.clone(), self.pool.clone(), name, options).await
     }
 
     pub async fn drop_timeline(&self, name: &str) -> Result<(), ChronicleError> {

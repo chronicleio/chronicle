@@ -108,35 +108,16 @@ impl FetchOptions {
 
 const DEFAULT_REPLICATION_FACTOR: usize = 3;
 const DEFAULT_BATCH_SIZE: usize = 256;
-const DEFAULT_LINGER: std::time::Duration = std::time::Duration::from_millis(5);
-
-#[derive(Debug, Clone)]
-pub enum TimelineMode {
-    ReadWrite {
-        replication_factor: usize,
-        schema_id: Option<String>,
-        max_batch_size: usize,
-        linger: std::time::Duration,
-    },
-    ReadOnly,
-}
-
-impl Default for TimelineMode {
-    fn default() -> Self {
-        Self::ReadWrite {
-            replication_factor: DEFAULT_REPLICATION_FACTOR,
-            schema_id: None,
-            max_batch_size: DEFAULT_BATCH_SIZE,
-            linger: DEFAULT_LINGER,
-        }
-    }
-}
+const DEFAULT_LINGER: Duration = Duration::from_millis(5);
 
 #[derive(Debug, Clone)]
 pub struct TimelineOptions {
     pub(crate) retention: Option<Duration>,
     pub(crate) compaction: bool,
-    pub(crate) mode: TimelineMode,
+    pub(crate) replication_factor: usize,
+    pub(crate) schema_id: Option<String>,
+    pub(crate) max_batch_size: usize,
+    pub(crate) linger: Duration,
     pub(crate) request_timeout: Duration,
 }
 
@@ -145,7 +126,10 @@ impl Default for TimelineOptions {
         Self {
             retention: None,
             compaction: false,
-            mode: TimelineMode::default(),
+            replication_factor: DEFAULT_REPLICATION_FACTOR,
+            schema_id: None,
+            max_batch_size: DEFAULT_BATCH_SIZE,
+            linger: DEFAULT_LINGER,
             request_timeout: Duration::from_secs(30),
         }
     }
@@ -156,14 +140,7 @@ impl TimelineOptions {
         Self::default()
     }
 
-    pub fn readonly() -> Self {
-        Self {
-            mode: TimelineMode::ReadOnly,
-            ..Self::default()
-        }
-    }
-
-    pub fn retention(mut self, duration: std::time::Duration) -> Self {
+    pub fn retention(mut self, duration: Duration) -> Self {
         self.retention = Some(duration);
         self
     }
@@ -173,8 +150,23 @@ impl TimelineOptions {
         self
     }
 
-    pub fn mode(mut self, mode: TimelineMode) -> Self {
-        self.mode = mode;
+    pub fn replication_factor(mut self, rf: usize) -> Self {
+        self.replication_factor = rf;
+        self
+    }
+
+    pub fn schema_id(mut self, id: String) -> Self {
+        self.schema_id = Some(id);
+        self
+    }
+
+    pub fn max_batch_size(mut self, size: usize) -> Self {
+        self.max_batch_size = size;
+        self
+    }
+
+    pub fn linger(mut self, duration: std::time::Duration) -> Self {
+        self.linger = duration;
         self
     }
 }

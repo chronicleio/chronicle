@@ -12,7 +12,7 @@ message TimelineMeta {
 }
 
 message Segment {
-  repeated string ensemble = 1;
+  repeated UnitInfo ensemble = 1;
   int64 start_offset = 2;
 }
 

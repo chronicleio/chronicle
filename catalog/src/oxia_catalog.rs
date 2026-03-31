@@ -1,4 +1,4 @@
-use chronicle_proto::pb_catalog::{Segment, TimelineMeta, UnitRegistration, UnitStatus};
+use chronicle_proto::pb_catalog::{Segment, TimelineMeta, UnitInfo, UnitRegistration, UnitStatus};
 use liboxia::client::{GetOption, GetSequenceUpdatesOption, OxiaClient, PutOption};
 use tokio::sync::mpsc::Receiver;
 use liboxia::client_builder::OxiaClientBuilder;
@@ -101,7 +101,7 @@ impl OxiaCatalog {
         Self::decode_meta(&value, result.version.version_id)
     }
 
-    pub async fn put_timeline(
+    pub async fn timeline_update(
         &self,
         meta: &TimelineMeta,
         expected_version: i64,
@@ -309,14 +309,14 @@ impl OxiaCatalog {
     ///
     /// Uses `ExpectVersionId(-1)` for creation so concurrent callers race
     /// safely — the loser sees `VersionConflict` and falls back to get.
-    pub async fn tl_fetch_or_insert_w_seg<F, Fut>(
+    pub async fn timeline_get_or_init_last_segment<F, Fut>(
         &self,
         timeline_name: &str,
         ensemble_supplier: F,
     ) -> Result<Versioned<Segment>, CatalogError>
     where
         F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<Vec<String>, CatalogError>>,
+        Fut: Future<Output = Result<Vec<UnitInfo>, CatalogError>>,
     {
         if let Some(last) = self.get_last_segment(timeline_name).await? {
             return Ok(last);
@@ -351,7 +351,7 @@ impl OxiaCatalog {
         loop {
             let mut updated = tc.clone();
             updated.term = tc.term + 1;
-            match self.put_timeline(&updated, tc.version).await {
+            match self.timeline_update(&updated, tc.version).await {
                 Ok(tc) => return Ok(tc),
                 Err(CatalogError::VersionConflict { .. }) => {
                     tc = self.get_timeline(name).await?;
