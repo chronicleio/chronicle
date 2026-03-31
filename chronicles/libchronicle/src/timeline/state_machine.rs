@@ -70,7 +70,7 @@ impl StateMachine {
         let max_batch_size = options.max_batch_size;
         let linger = options.linger;
         let cancel = CancellationToken::new();
-        let (record_tx, record_rx) = mpsc::channel::<RecordRequest>(max_batch_size * 2);
+        let (record_tx, record_rx) = mpsc::channel::<RecordRequest>(options.max_inflight);
         let (wm_tx, wm_rx) = mpsc::channel::<Watermark>(256);
         let (ready_tx, ready_rx) = oneshot::channel();
 

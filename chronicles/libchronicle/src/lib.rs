@@ -108,6 +108,7 @@ impl FetchOptions {
 
 const DEFAULT_REPLICATION_FACTOR: usize = 3;
 const DEFAULT_BATCH_SIZE: usize = 256;
+const DEFAULT_MAX_INFLIGHT: usize = 1024;
 const DEFAULT_LINGER: Duration = Duration::from_millis(5);
 
 #[derive(Debug, Clone)]
@@ -117,6 +118,7 @@ pub struct TimelineOptions {
     pub(crate) replication_factor: usize,
     pub(crate) schema_id: Option<String>,
     pub(crate) max_batch_size: usize,
+    pub(crate) max_inflight: usize,
     pub(crate) linger: Duration,
     pub(crate) request_timeout: Duration,
 }
@@ -129,6 +131,7 @@ impl Default for TimelineOptions {
             replication_factor: DEFAULT_REPLICATION_FACTOR,
             schema_id: None,
             max_batch_size: DEFAULT_BATCH_SIZE,
+            max_inflight: DEFAULT_MAX_INFLIGHT,
             linger: DEFAULT_LINGER,
             request_timeout: Duration::from_secs(30),
         }
@@ -162,6 +165,11 @@ impl TimelineOptions {
 
     pub fn max_batch_size(mut self, size: usize) -> Self {
         self.max_batch_size = size;
+        self
+    }
+
+    pub fn max_inflight(mut self, size: usize) -> Self {
+        self.max_inflight = size;
         self
     }
 
