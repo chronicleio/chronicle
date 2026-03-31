@@ -77,8 +77,8 @@ impl EventStream {
     }
 
     fn pick_conn(pool: &ConnPool, segment: &Segment) -> Result<Conn, ChronicleError> {
-        for ep in &segment.ensemble {
-            match pool.get_or_connect(ep) {
+        for unit in &segment.ensemble {
+            match pool.get_or_connect(&unit.address) {
                 Ok(conn) => return Ok(conn),
                 Err(_) => continue,
             }
