@@ -5,7 +5,7 @@ use crate::error_inner::InnerError;
 use crate::{Event as UserEvent, Offset, TimelineOptions};
 use backoff::future;
 use catalog::Catalog;
-use chronicle_proto::pb_catalog::{TimelineMeta, UnitInfo};
+use chronicle_proto::pb_catalog::{Segment, TimelineMeta, UnitInfo};
 use chronicle_proto::pb_ext::{
     FenceResponse, RecordEventsRequest, RecordEventsRequestItem, StatusCode,
 };
@@ -33,6 +33,8 @@ struct State {
     lrs: i64,
     needs_trunc: bool,
     ensemble: Vec<UnitInfo>,
+    segment_start_offset: i64,
+    segment_version: i64,
 }
 
 struct InflightBatch {
@@ -62,6 +64,8 @@ impl StateMachine {
             lrs: 0,
             needs_trunc: false,
             ensemble: Vec::new(),
+            segment_start_offset: 0,
+            segment_version: -1,
         };
 
         let max_batch_size = options.max_batch_size;
@@ -139,6 +143,8 @@ async fn init(state: &mut State) -> Result<Vec<(String, watch::Receiver<i64>)>, 
         .map_err(|e| ChronicleError::UnitNotEnough(e.to_string()))?;
 
     state.ensemble = writable_segment.value.ensemble.clone();
+    state.segment_start_offset = writable_segment.value.start_offset;
+    state.segment_version = writable_segment.version;
 
     info!(
         timeline_id = state.meta.timeline_id,
@@ -214,53 +220,45 @@ async fn run(
 
     let mut batch: Vec<RecordRequest> = Vec::with_capacity(max_batch_size);
     let mut inflight: VecDeque<InflightBatch> = VecDeque::new();
-    let linger_sleep = tokio::time::sleep(far_future());
-    tokio::pin!(linger_sleep);
-    let mut linger_active = false;
+    let mut linger_tick = tokio::time::interval(linger);
 
     loop {
         tokio::select! {
-                biased;
+            biased;
 
-                _ = cancel.cancelled() => {
-                    fail_all_inflight(&mut inflight, ChronicleError::Canceled);
-                    for req in batch.drain(..) {
-                        let _ = req.reply.send(Err(ChronicleError::Canceled));
-                    }
-                    return;
-                }
-
-                lra = wait_watermark_advance(&mut wm_watches) => {
-                    handle_watermark_changed(&mut state, &mut inflight, lra);
-                }
-
-                count = record_rx.recv_many(&mut batch, max_batch_size) => {
-                    if count == 0 {
-                        continue;
-                    }
-                    if batch.len() >= max_batch_size {
-                        flush_batch(&mut state, &mut batch, &mut inflight).await;
-                        linger_sleep.as_mut().reset(tokio::time::Instant::now() + far_future());
-                        linger_active = false;
-                    } else if !linger_active {
-                        linger_sleep
-                            .as_mut()
-                            .reset(tokio::time::Instant::now() + linger);
-                        linger_active = true;
+            _ = cancel.cancelled() => {
+                for batch in inflight.drain(..) {
+                    for (_, tx) in batch.callbacks {
+                        let _ = tx.send(Err(ChronicleError::Canceled));
                     }
                 }
+                for req in batch.drain(..) {
+                    let _ = req.reply.send(Err(ChronicleError::Canceled));
+                }
+                return;
+            }
 
-                _ = &mut linger_sleep, if linger_active => {
-                    if !batch.is_empty() {
-                        flush_batch(&mut state, &mut batch, &mut inflight).await;
-                    }
-                    linger_sleep.as_mut().reset(tokio::time::Instant::now() + far_future());
-                    linger_active = false;
+            lra = wait_watermark_advance(&mut wm_watches) => {
+                handle_watermark_changed(&mut state, &mut inflight, lra);
+            }
+
+            count = record_rx.recv_many(&mut batch, max_batch_size) => {
+                if count == 0 {
+                    continue;
+                }
+                if batch.len() >= max_batch_size {
+                    flush_batch(&mut state, &mut batch, &mut inflight, &mut wm_watches).await;
                 }
             }
+
+            _ = linger_tick.tick() => {
+                if !batch.is_empty() {
+                    flush_batch(&mut state, &mut batch, &mut inflight, &mut wm_watches).await;
+                }
+            }
+        }
     }
 }
-
 
 async fn wait_watermark_advance(watches: &mut [(String, watch::Receiver<i64>)]) -> i64 {
     if watches.is_empty() {
@@ -271,7 +269,11 @@ async fn wait_watermark_advance(watches: &mut [(String, watch::Receiver<i64>)]) 
         .map(|(_, rx)| Box::pin(rx.changed()))
         .collect();
     let _ = select_all(futs).await;
-    watches.iter().map(|(_, rx)| *rx.borrow()).min().unwrap_or(-1)
+    watches
+        .iter()
+        .map(|(_, rx)| *rx.borrow())
+        .min()
+        .unwrap_or(-1)
 }
 
 fn handle_watermark_changed(state: &mut State, inflight: &mut VecDeque<InflightBatch>, lra: i64) {
@@ -434,6 +436,7 @@ async fn flush_batch(
     state: &mut State,
     batch: &mut Vec<RecordRequest>,
     inflight: &mut VecDeque<InflightBatch>,
+    wm_watches: &mut Vec<(String, watch::Receiver<i64>)>,
 ) {
     let mut events = Vec::with_capacity(batch.len());
     let mut replies = Vec::with_capacity(batch.len());
@@ -446,11 +449,33 @@ async fn flush_batch(
     let max_offset = *offsets.last().unwrap();
     let request = RecordEventsRequest { items };
 
-    for unit in &state.ensemble {
-        if let Ok(conn) = state.pool.get_or_connect(&unit.address) {
-            if let Err(e) = conn.send_record(request.clone()).await {
-                warn!(unit = ?unit, error = %e, "flush_batch: failed to send");
+    let futs = state.ensemble.iter().map(|unit| {
+        let unit = unit.clone();
+        let request = request.clone();
+        let pool = state.pool.clone();
+        let timeout = state.options.request_timeout;
+        async move {
+            let result = send_record_with_retry(&pool, &unit, request, timeout).await;
+            (unit, result)
+        }
+    });
+    let results = join_all(futs).await;
+
+    let failed: Vec<UnitInfo> = results
+        .into_iter()
+        .filter_map(|(unit, result)| {
+            if let Err(e) = result {
+                warn!(unit = ?unit, error = %e, "flush_batch: send failed after retries");
+                Some(unit)
+            } else {
+                None
             }
+        })
+        .collect();
+
+    if !failed.is_empty() {
+        if let Err(e) = recover_ensemble(state, &failed, wm_watches).await {
+            warn!(error = %e, "ensemble recovery failed");
         }
     }
 
@@ -461,11 +486,97 @@ async fn flush_batch(
     });
 }
 
-fn fail_all_inflight(inflight: &mut VecDeque<InflightBatch>, error: ChronicleError) {
-    let msg = error.to_string();
-    for batch in inflight.drain(..) {
-        for (_, tx) in batch.callbacks {
-            let _ = tx.send(Err(ChronicleError::Internal(msg.clone())));
-        }
-    }
+async fn send_record_with_retry(
+    pool: &ConnPool,
+    unit: &UnitInfo,
+    request: RecordEventsRequest,
+    timeout: Duration,
+) -> Result<(), ChronicleError> {
+    let backoff = backoff::ExponentialBackoffBuilder::new()
+        .with_max_elapsed_time(Some(timeout))
+        .build();
+    future::retry_notify(
+        backoff,
+        || async {
+            let conn = pool
+                .get_or_connect(&unit.address)
+                .map_err(|e| backoff::Error::transient(ChronicleError::Transport(e.to_string())))?;
+            conn.send_record(request.clone())
+                .await
+                .map_err(backoff::Error::transient)
+        },
+        |e, retry_in| {
+            warn!(
+                unit = ?unit,
+                error = %e,
+                retry_in = ?retry_in,
+                "send_record failed, retrying"
+            );
+        },
+    )
+    .await
+}
+
+async fn recover_ensemble(
+    state: &mut State,
+    failed: &[UnitInfo],
+    wm_watches: &mut Vec<(String, watch::Receiver<i64>)>,
+) -> Result<(), ChronicleError> {
+    info!(
+        failed_count = failed.len(),
+        "recovering ensemble: replacing failed units"
+    );
+
+    let failed_deque: VecDeque<UnitInfo> = failed.iter().cloned().collect();
+    let healthy: VecDeque<UnitInfo> = state
+        .ensemble
+        .iter()
+        .filter(|u| !failed.contains(u))
+        .cloned()
+        .collect();
+
+    let candidates = state
+        .catalog
+        .list_writable_units()
+        .await
+        .map_err(|e| ChronicleError::Internal(e.to_string()))?;
+
+    let new_ensemble =
+        select_ensemble(&candidates, &healthy, &failed_deque).ok_or_else(|| {
+            ChronicleError::UnitNotEnough("not enough units to replace failed members".into())
+        })?;
+
+    let has_records = state.lrs >= state.segment_start_offset;
+    let segment = Segment {
+        ensemble: new_ensemble.clone(),
+        start_offset: if has_records {
+            state.meta.lra + 1
+        } else {
+            state.segment_start_offset
+        },
+    };
+    let expected_version = if has_records {
+        -1 // new segment
+    } else {
+        state.segment_version // update in place
+    };
+
+    let versioned = state
+        .catalog
+        .put_segment(&state.name, &segment, expected_version)
+        .await
+        .map_err(|e| ChronicleError::Internal(e.to_string()))?;
+
+    state.ensemble = new_ensemble;
+    state.segment_start_offset = segment.start_offset;
+    state.segment_version = versioned.version;
+
+    *wm_watches = fence_and_watch(state).await?;
+
+    info!(
+        timeline_id = state.meta.timeline_id,
+        "ensemble recovery complete"
+    );
+
+    Ok(())
 }

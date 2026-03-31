@@ -1,7 +1,7 @@
 use liboxia::errors::OxiaError;
 use thiserror::Error;
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum CatalogError {
     #[error("Not found: {0}")]
     NotFound(String),

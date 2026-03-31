@@ -2,7 +2,7 @@ use catalog::error::CatalogError;
 use thiserror::Error;
 use crate::error_inner::InnerError;
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum ChronicleError {
     #[error("Timeline not found: {0}")]
     TimelineNotFound(String),
