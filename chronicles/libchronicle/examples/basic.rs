@@ -10,7 +10,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let chronicle = Chronicle::new(catalog, ChronicleOptions::new());
 
-    let mut timeline = chronicle
+    let timeline = chronicle
         .open_timeline("example-timeline", TimelineOptions::new().replication_factor(1))
         .await?;
 
