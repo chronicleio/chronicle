@@ -45,6 +45,7 @@ struct InflightBatch {
 }
 
 struct StateMachineInner {
+    timeline_id: i64,
     record_tx: mpsc::Sender<RecordRequest>,
     cancel: CancellationToken,
     task: sync::Mutex<Option<JoinHandle<()>>>,
@@ -61,7 +62,7 @@ impl StateMachine {
         catalog: Arc<Catalog>,
         pool: Arc<ConnPool>,
         options: &TimelineOptions,
-    ) -> Result<(Self, TimelineMeta), ChronicleError> {
+    ) -> Result<Self, ChronicleError> {
         let mut state = State {
             name: name.to_string(),
             meta: TimelineMeta::default(),
@@ -81,23 +82,25 @@ impl StateMachine {
         let cancel = CancellationToken::new();
         let (record_tx, record_rx) = mpsc::channel::<RecordRequest>(options.max_inflight);
 
-        init(&mut state).await?;
-        let meta = state.meta.clone();
+        recover(&mut state).await?;
+        let timeline_id = state.meta.timeline_id;
 
         let task = tokio::spawn(run(
             state, record_rx, cancel.clone(), max_batch_size, linger,
         ));
 
-        Ok((
-            Self {
-                inner: Arc::new(StateMachineInner {
-                    record_tx,
-                    cancel,
-                    task: sync::Mutex::new(Some(task)),
-                }),
-            },
-            meta,
-        ))
+        Ok(Self {
+            inner: Arc::new(StateMachineInner {
+                timeline_id,
+                record_tx,
+                cancel,
+                task: sync::Mutex::new(Some(task)),
+            }),
+        })
+    }
+
+    pub fn timeline_id(&self) -> i64 {
+        self.inner.timeline_id
     }
 
     pub async fn record(&self, event: UserEvent) -> Result<Offset, ChronicleError> {
@@ -292,7 +295,7 @@ fn subscribe_watches(
 // Init — new term, segment, fence via replicate
 // ---------------------------------------------------------------------------
 
-async fn init(state: &mut State) -> Result<(), ChronicleError> {
+async fn recover(state: &mut State) -> Result<(), ChronicleError> {
     state.meta = state
         .catalog
         .tl_new_term(&state.name)
@@ -343,11 +346,19 @@ async fn init(state: &mut State) -> Result<(), ChronicleError> {
     )
     .await;
 
-    let lra = fence_results
+    let min_lra = fence_results
+        .iter()
+        .map(|(_, resp)| resp.lra)
+        .min()
+        .unwrap_or(0);
+    let max_lra = fence_results
         .iter()
         .map(|(_, resp)| resp.lra)
         .max()
         .unwrap_or(0);
+
+    let lra = min_lra;
+    state.needs_trunc = lra > 0 || min_lra != max_lra;
 
     if state.meta.lra != lra {
         state.meta.lra = lra;
@@ -358,7 +369,6 @@ async fn init(state: &mut State) -> Result<(), ChronicleError> {
             .await
             .map_err(|e| ChronicleError::Internal(e.to_string()))?;
     }
-    state.needs_trunc = lra > 0;
 
     state.wm_watches = subscribe_watches(&state.ensemble, &state.pool, state.meta.timeline_id, state.meta.lra);
 

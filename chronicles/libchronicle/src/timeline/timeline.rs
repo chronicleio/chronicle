@@ -29,17 +29,17 @@ impl Timeline {
         name: &str,
         options: TimelineOptions,
     ) -> Result<Self, ChronicleError> {
-        let (sm, meta) = StateMachine::start(name, catalog.clone(), pool.clone(), &options).await?;
+        let sm = StateMachine::start(name, catalog.clone(), pool.clone(), &options).await?;
 
         info!(
-            timeline_id = meta.timeline_id,
+            timeline_id = sm.timeline_id(),
             timeline = %name,
             "timeline opened"
         );
 
         Ok(Self {
             inner: Arc::new(TimelineInner {
-                timeline_id: meta.timeline_id,
+                timeline_id: sm.timeline_id(),
                 timeline_name: name.to_string(),
                 catalog,
                 pool,

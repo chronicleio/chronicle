@@ -658,9 +658,11 @@ TimelineHandleFenceResponse(tid) ==
             /\ message.code = Ok
             /\ LET
                    new_fenced   == timeline.fenced \cup {message.unit}
-                   new_rec_lra  == IF message.lra > timeline.reconciliation_lra
+                   new_rec_lra  == IF timeline.fenced = {}
                                    THEN message.lra
-                                   ELSE timeline.reconciliation_lra
+                                   ELSE IF message.lra < timeline.reconciliation_lra
+                                        THEN message.lra
+                                        ELSE timeline.reconciliation_lra
                    all_fenced   == new_fenced = timeline.reconciliation_ensemble
                IN
                 /\ timelines' = [timelines EXCEPT ![tid] =
