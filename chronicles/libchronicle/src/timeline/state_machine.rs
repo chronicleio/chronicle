@@ -61,7 +61,7 @@ impl StateMachine {
         pool: Arc<ConnPool>,
         options: &TimelineOptions,
     ) -> Result<(Self, TimelineMeta), ChronicleError> {
-        let state = State {
+        let mut state = State {
             name: name.to_string(),
             meta: TimelineMeta::default(),
             catalog,
@@ -78,15 +78,14 @@ impl StateMachine {
         let linger = options.linger;
         let cancel = CancellationToken::new();
         let (record_tx, record_rx) = mpsc::channel::<RecordRequest>(options.max_inflight);
-        let (ready_tx, ready_rx) = oneshot::channel();
+
+        let mut wm_watches = Vec::new();
+        init(&mut state, &mut wm_watches).await?;
+        let meta = state.meta.clone();
 
         let task = tokio::spawn(run(
-            state, ready_tx, record_rx, cancel.clone(), max_batch_size, linger,
+            state, wm_watches, record_rx, cancel.clone(), max_batch_size, linger,
         ));
-
-        let meta = ready_rx
-            .await
-            .map_err(|_| ChronicleError::Internal("state machine died during init".into()))??;
 
         Ok((
             Self {
@@ -378,19 +377,12 @@ async fn init(
 
 async fn run(
     mut state: State,
-    ready_tx: oneshot::Sender<Result<TimelineMeta, ChronicleError>>,
+    mut wm_watches: Vec<(String, watch::Receiver<i64>)>,
     mut record_rx: mpsc::Receiver<RecordRequest>,
     cancel: CancellationToken,
     max_batch_size: usize,
     linger: Duration,
 ) {
-    let mut wm_watches = Vec::new();
-    if let Err(e) = init(&mut state, &mut wm_watches).await {
-        let _ = ready_tx.send(Err(e));
-        return;
-    }
-    let _ = ready_tx.send(Ok(state.meta.clone()));
-
     let mut batch: Vec<RecordRequest> = Vec::with_capacity(max_batch_size);
     let mut inflight: VecDeque<InflightBatch> = VecDeque::new();
     let mut linger_tick = tokio::time::interval(linger);
