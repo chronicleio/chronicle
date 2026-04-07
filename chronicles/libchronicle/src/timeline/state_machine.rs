@@ -36,6 +36,7 @@ struct State {
     ensemble: Vec<UnitInfo>,
     segment_start_offset: i64,
     segment_version: i64,
+    wm_watches: Vec<(String, watch::Receiver<i64>)>,
 }
 
 struct InflightBatch {
@@ -72,6 +73,7 @@ impl StateMachine {
             ensemble: Vec::new(),
             segment_start_offset: 0,
             segment_version: -1,
+            wm_watches: Vec::new(),
         };
 
         let max_batch_size = options.max_batch_size;
@@ -79,12 +81,11 @@ impl StateMachine {
         let cancel = CancellationToken::new();
         let (record_tx, record_rx) = mpsc::channel::<RecordRequest>(options.max_inflight);
 
-        let mut wm_watches = Vec::new();
-        init(&mut state, &mut wm_watches).await?;
+        init(&mut state).await?;
         let meta = state.meta.clone();
 
         let task = tokio::spawn(run(
-            state, wm_watches, record_rx, cancel.clone(), max_batch_size, linger,
+            state, record_rx, cancel.clone(), max_batch_size, linger,
         ));
 
         Ok((
@@ -128,7 +129,6 @@ impl StateMachine {
 
 async fn broadcast<R, Op, OpFut>(
     state: &mut State,
-    wm_watches: &mut Vec<(String, watch::Receiver<i64>)>,
     op: Op,
 ) -> Vec<(UnitInfo, R)>
 where
@@ -193,7 +193,7 @@ where
             continue;
         }
 
-        *wm_watches = subscribe_watches(state);
+        state.wm_watches = subscribe_watches(&state.ensemble, &state.pool, state.meta.timeline_id, state.meta.lra);
 
         info!(
             timeline_id = state.meta.timeline_id,
@@ -272,11 +272,16 @@ async fn fence_members(state: &State, members: &[UnitInfo]) -> Result<(), Chroni
     Ok(())
 }
 
-fn subscribe_watches(state: &State) -> Vec<(String, watch::Receiver<i64>)> {
+fn subscribe_watches(
+    ensemble: &[UnitInfo],
+    pool: &ConnPool,
+    timeline_id: i64,
+    lra: i64,
+) -> Vec<(String, watch::Receiver<i64>)> {
     let mut watches = Vec::new();
-    for unit in &state.ensemble {
-        if let Ok(conn) = state.pool.get_or_connect(&unit.address) {
-            let rx = conn.subscribe_watermark(state.meta.timeline_id, state.meta.lra);
+    for unit in ensemble {
+        if let Ok(conn) = pool.get_or_connect(&unit.address) {
+            let rx = conn.subscribe_watermark(timeline_id, lra);
             watches.push((unit.address.clone(), rx));
         }
     }
@@ -287,10 +292,7 @@ fn subscribe_watches(state: &State) -> Vec<(String, watch::Receiver<i64>)> {
 // Init — new term, segment, fence via replicate
 // ---------------------------------------------------------------------------
 
-async fn init(
-    state: &mut State,
-    wm_watches: &mut Vec<(String, watch::Receiver<i64>)>,
-) -> Result<(), ChronicleError> {
+async fn init(state: &mut State) -> Result<(), ChronicleError> {
     state.meta = state
         .catalog
         .tl_new_term(&state.name)
@@ -328,7 +330,6 @@ async fn init(
     let term = state.meta.term;
     let fence_results = broadcast(
         state,
-        wm_watches,
         |pool, unit, timeout| async move {
             let result = match pool.get_or_connect(&unit.address) {
                 Ok(conn) => conn
@@ -359,7 +360,7 @@ async fn init(
     }
     state.needs_trunc = lra > 0;
 
-    *wm_watches = subscribe_watches(state);
+    state.wm_watches = subscribe_watches(&state.ensemble, &state.pool, state.meta.timeline_id, state.meta.lra);
 
     info!(
         timeline_id = state.meta.timeline_id,
@@ -377,7 +378,6 @@ async fn init(
 
 async fn run(
     mut state: State,
-    mut wm_watches: Vec<(String, watch::Receiver<i64>)>,
     mut record_rx: mpsc::Receiver<RecordRequest>,
     cancel: CancellationToken,
     max_batch_size: usize,
@@ -403,7 +403,7 @@ async fn run(
                 return;
             }
 
-            lra = wait_watermark_advance(&mut wm_watches) => {
+            lra = wait_watermark_advance(&mut state.wm_watches) => {
                 handle_watermark_changed(&mut state, &mut inflight, lra);
             }
 
@@ -412,13 +412,13 @@ async fn run(
                     continue;
                 }
                 if batch.len() >= max_batch_size {
-                    flush_batch(&mut state, &mut batch, &mut inflight, &mut wm_watches).await;
+                    flush_batch(&mut state, &mut batch, &mut inflight).await;
                 }
             }
 
             _ = linger_tick.tick() => {
                 if !batch.is_empty() {
-                    flush_batch(&mut state, &mut batch, &mut inflight, &mut wm_watches).await;
+                    flush_batch(&mut state, &mut batch, &mut inflight).await;
                 }
             }
         }
@@ -500,7 +500,6 @@ async fn flush_batch(
     state: &mut State,
     batch: &mut Vec<RecordRequest>,
     inflight: &mut VecDeque<InflightBatch>,
-    wm_watches: &mut Vec<(String, watch::Receiver<i64>)>,
 ) {
     let mut events = Vec::with_capacity(batch.len());
     let mut replies = Vec::with_capacity(batch.len());
@@ -515,7 +514,6 @@ async fn flush_batch(
 
     broadcast(
         state,
-        wm_watches,
         |pool, unit, timeout| {
             let request = request.clone();
             async move {
