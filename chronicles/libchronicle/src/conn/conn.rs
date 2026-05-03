@@ -127,6 +127,9 @@ impl Conn {
     // -- watermark subscribers ------------------------------------------------
 
     pub fn subscribe_watermark(&self, timeline_id: i64, initial: i64) -> watch::Receiver<i64> {
+        if let Some(existing) = self.wm_subscribers.get(&timeline_id) {
+            return existing.subscribe();
+        }
         let (tx, rx) = watch::channel(initial);
         self.wm_subscribers.insert(timeline_id, tx);
         rx
