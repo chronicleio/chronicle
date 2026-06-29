@@ -19,11 +19,7 @@ struct StreamState<Req: Send + 'static> {
 
 impl<Req: Send + 'static> StreamState<Req> {
     fn is_alive(&self) -> bool {
-        !self.tx.is_closed()
-            && self
-                .reader
-                .as_ref()
-                .is_some_and(|r| !r.is_finished())
+        !self.tx.is_closed() && self.reader.as_ref().is_some_and(|r| !r.is_finished())
     }
 }
 
@@ -41,17 +37,12 @@ impl<Req: Send + 'static> Drop for StreamState<Req> {
 
 /// Returns `(request_sender, response_reader_handle)`.
 pub(crate) type StreamFactory<Req> = Arc<
-    dyn Fn()
-            -> Pin<
-                Box<
-                    dyn Future<
-                            Output = Result<
-                                (mpsc::Sender<Req>, JoinHandle<()>),
-                                ChronicleError,
-                            >,
-                        > + Send,
-                >,
-            > + Send
+    dyn Fn() -> Pin<
+            Box<
+                dyn Future<Output = Result<(mpsc::Sender<Req>, JoinHandle<()>), ChronicleError>>
+                    + Send,
+            >,
+        > + Send
         + Sync,
 >;
 

@@ -45,11 +45,7 @@ impl RetentionManager {
     }
 }
 
-fn run_retention(
-    segment_manager: &SegmentManager,
-    index: &Storage,
-    ttl_ms: i64,
-) {
+fn run_retention(segment_manager: &SegmentManager, index: &Storage, ttl_ms: i64) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -69,7 +65,10 @@ fn run_retention(
         return;
     }
 
-    info!(count = expired_ids.len(), "retention: evicting expired segments");
+    info!(
+        count = expired_ids.len(),
+        "retention: evicting expired segments"
+    );
 
     let expired_set: HashSet<u64> = expired_ids.iter().copied().collect();
     let entries = index.scan_by_segment_ids(&expired_set);
@@ -79,9 +78,15 @@ fn run_retention(
             warn!(error = %e, "retention: failed to delete index entries");
             return;
         }
-        info!(entries = entries.len(), "retention: deleted expired index entries");
+        info!(
+            entries = entries.len(),
+            "retention: deleted expired index entries"
+        );
     }
 
     segment_manager.remove_segments(&expired_ids);
-    info!(segments = expired_ids.len(), "retention: removed expired segments");
+    info!(
+        segments = expired_ids.len(),
+        "retention: removed expired segments"
+    );
 }

@@ -1,10 +1,10 @@
 use chronicle_proto::pb_catalog::{Segment, TimelineMeta, UnitInfo, UnitRegistration, UnitStatus};
 use liboxia::client::{GetOption, GetSequenceUpdatesOption, OxiaClient, PutOption};
-use tokio::sync::mpsc::Receiver;
 use liboxia::client_builder::OxiaClientBuilder;
 use liboxia::errors::OxiaError;
 use prost::Message;
 use std::sync::atomic::{AtomicI64, Ordering};
+use tokio::sync::mpsc::Receiver;
 use tracing::{debug, info};
 
 use crate::Versioned;
@@ -37,9 +37,7 @@ impl OxiaCatalog {
         };
         if let Ok(timelines) = catalog.list_timelines().await {
             let max_id = timelines.iter().map(|t| t.timeline_id).max().unwrap_or(0);
-            catalog
-                .next_timeline_id
-                .store(max_id + 1, Ordering::SeqCst);
+            catalog.next_timeline_id.store(max_id + 1, Ordering::SeqCst);
         }
         Ok(catalog)
     }
@@ -62,7 +60,11 @@ impl OxiaCatalog {
         } else {
             &registration.zone
         };
-        let address = &registration.unit.as_ref().expect("unit info required").address;
+        let address = &registration
+            .unit
+            .as_ref()
+            .expect("unit info required")
+            .address;
         let unit_id = Self::sanitize_address(address);
         format!("{}{}/{}", UNITS_PREFIX, zone, unit_id)
     }
@@ -75,9 +77,7 @@ impl OxiaCatalog {
     }
 
     fn sanitize_address(address: &str) -> String {
-        address
-            .replace("://", "_")
-            .replace(['/', ':'], "_")
+        address.replace("://", "_").replace(['/', ':'], "_")
     }
 }
 
@@ -148,9 +148,7 @@ impl OxiaCatalog {
             .put_with_options(key, value, vec![PutOption::ExpectVersionId(-1)])
             .await
             .map_err(|e| match e {
-                OxiaError::UnexpectedVersionId() => {
-                    CatalogError::AlreadyExists(name.to_string())
-                }
+                OxiaError::UnexpectedVersionId() => CatalogError::AlreadyExists(name.to_string()),
                 other => CatalogError::from(other),
             })?;
 
@@ -159,12 +157,18 @@ impl OxiaCatalog {
         Ok(created)
     }
 
-    pub async fn delete_timeline(&self, name: &str, expected_version: i64) -> Result<(), CatalogError> {
+    pub async fn delete_timeline(
+        &self,
+        name: &str,
+        expected_version: i64,
+    ) -> Result<(), CatalogError> {
         let key = Self::meta_key(name);
         self.client
             .delete_with_options(
                 key,
-                vec![liboxia::client::DeleteOption::ExpectVersionId(expected_version)],
+                vec![liboxia::client::DeleteOption::ExpectVersionId(
+                    expected_version,
+                )],
             )
             .await
             .map_err(|e| match e {
@@ -230,7 +234,10 @@ impl OxiaCatalog {
         Ok(Versioned::new(segment.clone(), result.version.version_id))
     }
 
-    pub async fn list_segments(&self, timeline_name: &str) -> Result<Vec<Versioned<Segment>>, CatalogError> {
+    pub async fn list_segments(
+        &self,
+        timeline_name: &str,
+    ) -> Result<Vec<Versioned<Segment>>, CatalogError> {
         let min_key = crate::segment_key_prefix(timeline_name);
         let max_key = crate::segment_key_max(timeline_name);
 
@@ -243,15 +250,19 @@ impl OxiaCatalog {
         let mut segments = Vec::with_capacity(result.records.len());
         for record in &result.records {
             if let Some(ref value) = record.value {
-                let seg = Segment::decode(value.as_slice())
-                    .map_err(|e| CatalogError::Internal(format!("failed to decode segment: {}", e)))?;
+                let seg = Segment::decode(value.as_slice()).map_err(|e| {
+                    CatalogError::Internal(format!("failed to decode segment: {}", e))
+                })?;
                 segments.push(Versioned::new(seg, record.version.version_id));
             }
         }
         Ok(segments)
     }
 
-    pub async fn get_last_segment(&self, timeline_name: &str) -> Result<Option<Versioned<Segment>>, CatalogError> {
+    pub async fn get_last_segment(
+        &self,
+        timeline_name: &str,
+    ) -> Result<Option<Versioned<Segment>>, CatalogError> {
         let segments = self.list_segments(timeline_name).await?;
         Ok(segments.into_iter().last())
     }
@@ -276,12 +287,12 @@ impl OxiaCatalog {
             .map_err(CatalogError::from)?;
 
         // Take the last record — the segment with the largest start_offset <= offset.
-        if let Some(record) = result.records.last() {
-            if let Some(ref value) = record.value {
-                let seg = Segment::decode(value.as_slice())
-                    .map_err(|e| CatalogError::Internal(format!("failed to decode segment: {}", e)))?;
-                return Ok(Some(Versioned::new(seg, record.version.version_id)));
-            }
+        if let Some(record) = result.records.last()
+            && let Some(ref value) = record.value
+        {
+            let seg = Segment::decode(value.as_slice())
+                .map_err(|e| CatalogError::Internal(format!("failed to decode segment: {}", e)))?;
+            return Ok(Some(Versioned::new(seg, record.version.version_id)));
         }
         Ok(None)
     }
@@ -328,13 +339,10 @@ impl OxiaCatalog {
         };
         match self.put_segment(timeline_name, &segment, -1).await {
             Ok(vs) => Ok(vs),
-            Err(CatalogError::VersionConflict { .. }) => {
-                self.get_last_segment(timeline_name)
-                    .await?
-                    .ok_or_else(|| CatalogError::Internal(
-                        "segment vanished after conflict".into(),
-                    ))
-            }
+            Err(CatalogError::VersionConflict { .. }) => self
+                .get_last_segment(timeline_name)
+                .await?
+                .ok_or_else(|| CatalogError::Internal("segment vanished after conflict".into())),
             Err(e) => Err(e),
         }
     }
@@ -343,10 +351,7 @@ impl OxiaCatalog {
     ///
     /// Combines `tl_fetch_or_insert` + term increment in a single method
     /// to avoid a redundant read. Retries on CAS conflict.
-    pub async fn tl_new_term(
-        &self,
-        name: &str,
-    ) -> Result<TimelineMeta, CatalogError> {
+    pub async fn tl_new_term(&self, name: &str) -> Result<TimelineMeta, CatalogError> {
         let mut tc = self.tl_fetch_or_insert(name).await?;
         loop {
             let mut updated = tc.clone();
@@ -363,13 +368,14 @@ impl OxiaCatalog {
 
     /// Register a unit at /chronicle/units/{zone}/{unit-id}.
     /// Each unit has its own key — no CAS contention between units.
-    pub async fn register_unit(
-        &self,
-        registration: &UnitRegistration,
-    ) -> Result<(), CatalogError> {
+    pub async fn register_unit(&self, registration: &UnitRegistration) -> Result<(), CatalogError> {
         let key = Self::unit_key(registration);
         let value = registration.encode_to_vec();
-        let address = &registration.unit.as_ref().expect("unit info required").address;
+        let address = &registration
+            .unit
+            .as_ref()
+            .expect("unit info required")
+            .address;
         info!(address = %address, zone = %registration.zone, key = %key, "register_unit");
 
         self.client
@@ -383,13 +389,10 @@ impl OxiaCatalog {
     /// Unregister a unit by deleting its key.
     pub async fn unregister_unit(&self, address: &str, zone: &str) -> Result<(), CatalogError> {
         let key = Self::unit_key_for_address(zone, address);
-        self.client
-            .delete(key)
-            .await
-            .map_err(|e| match e {
-                OxiaError::KeyNotFound() => CatalogError::NotFound(address.to_string()),
-                other => CatalogError::from(other),
-            })?;
+        self.client.delete(key).await.map_err(|e| match e {
+            OxiaError::KeyNotFound() => CatalogError::NotFound(address.to_string()),
+            other => CatalogError::from(other),
+        })?;
         Ok(())
     }
 

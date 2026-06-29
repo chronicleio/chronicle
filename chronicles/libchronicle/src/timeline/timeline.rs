@@ -12,8 +12,6 @@ struct TimelineInner {
     timeline_name: String,
     catalog: Arc<Catalog>,
     pool: Arc<ConnPool>,
-    #[allow(dead_code)]
-    options: TimelineOptions,
     state_machine: Option<StateMachine>,
 }
 
@@ -43,7 +41,6 @@ impl Timeline {
                 timeline_name: name.to_string(),
                 catalog,
                 pool,
-                options,
                 state_machine: Some(sm),
             }),
         })
@@ -53,7 +50,7 @@ impl Timeline {
         catalog: Arc<Catalog>,
         pool: Arc<ConnPool>,
         name: &str,
-        options: TimelineOptions,
+        _options: TimelineOptions,
     ) -> Result<Self, ChronicleError> {
         let tc = catalog
             .get_timeline(name)
@@ -72,7 +69,6 @@ impl Timeline {
                 timeline_name: name.to_string(),
                 catalog,
                 pool,
-                options,
                 state_machine: None,
             }),
         })

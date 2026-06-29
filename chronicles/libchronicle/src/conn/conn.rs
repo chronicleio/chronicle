@@ -1,6 +1,7 @@
 use super::recoverable_stream::RecoverableStream;
 use crate::error::ChronicleError;
 use crate::error_inner::InnerError;
+use backoff::future;
 use chronicle_proto::pb_ext::{
     FenceRequest, FenceResponse, FetchEventsRequest, FetchEventsResponse, RecordEventsRequest,
     RecordEventsResponse, StatusCode, chronicle_client::ChronicleClient,
@@ -14,7 +15,6 @@ use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
-use backoff::future;
 use tracing::warn;
 // ---------------------------------------------------------------------------
 // ConnOptions
@@ -43,7 +43,6 @@ impl Default for ConnOptions {
         }
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // Conn — one logical connection with its own record and fetch streams
@@ -158,7 +157,7 @@ impl Conn {
         let response = client
             .fence(FenceRequest { timeline_id, term })
             .await
-            .map_err(|e| InnerError::from(e))?;
+            .map_err(InnerError::from)?;
         Ok(response.into_inner())
     }
 

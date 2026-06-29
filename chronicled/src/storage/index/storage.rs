@@ -3,9 +3,8 @@ use std::fs;
 use std::sync::Arc;
 
 use rocksdb::{
-    BlockBasedOptions, Cache, DB, DBCompressionType, LogLevel, Options, SliceTransform,
-    WriteBatch, WriteOptions,
-    statistics::Ticker,
+    BlockBasedOptions, Cache, DB, DBCompressionType, LogLevel, Options, SliceTransform, WriteBatch,
+    WriteOptions, statistics::Ticker,
 };
 
 use crate::error::unit_error::UnitError;
@@ -48,8 +47,9 @@ pub struct StorageOptions {
 
 impl Storage {
     pub fn new(options: StorageOptions) -> Result<Storage, UnitError> {
-        fs::create_dir_all(&options.path)
-            .map_err(|e| UnitError::Storage(format!("failed to create storage directory: {}", e)))?;
+        fs::create_dir_all(&options.path).map_err(|e| {
+            UnitError::Storage(format!("failed to create storage directory: {}", e))
+        })?;
 
         let idx = options.index.unwrap_or(ResolvedIndexOptions {
             block_cache_bytes: 256 * 1024 * 1024,
@@ -97,14 +97,15 @@ impl Storage {
         write_options.disable_wal(true);
 
         Ok(Storage {
-            inner: Arc::new(Inner { database: db, write_options, db_options }),
+            inner: Arc::new(Inner {
+                database: db,
+                write_options,
+                db_options,
+            }),
         })
     }
 
-    pub fn put_index_batch(
-        &self,
-        entries: &[((i64, i64), IndexEntry)],
-    ) -> Result<(), UnitError> {
+    pub fn put_index_batch(&self, entries: &[((i64, i64), IndexEntry)]) -> Result<(), UnitError> {
         let start = std::time::Instant::now();
         let mut batch = WriteBatch::default();
         for &((timeline_id, offset), ref entry) in entries {
@@ -112,21 +113,20 @@ impl Storage {
             let value = entry.encode();
             batch.put(key, value);
         }
-        let result = self.inner
+        let result = self
+            .inner
             .database
             .write_opt(batch, &self.inner.write_options)
             .map_err(|e| UnitError::Storage(e.to_string()));
         if let Some(m) = crate::observability::global_metrics() {
             m.index_writes.add(entries.len() as u64, &[]);
-            m.index_write_latency.record(start.elapsed().as_secs_f64(), &[]);
+            m.index_write_latency
+                .record(start.elapsed().as_secs_f64(), &[]);
         }
         result
     }
 
-    pub fn delete_index_batch(
-        &self,
-        keys: &[(i64, i64)],
-    ) -> Result<(), UnitError> {
+    pub fn delete_index_batch(&self, keys: &[(i64, i64)]) -> Result<(), UnitError> {
         let mut batch = WriteBatch::default();
         for &(timeline_id, offset) in keys {
             let key = encode_key(timeline_id, offset);
@@ -138,11 +138,7 @@ impl Storage {
             .map_err(|e| UnitError::Storage(e.to_string()))
     }
 
-    pub fn delete_index_range(
-        &self,
-        timeline_id: i64,
-        from_offset: i64,
-    ) -> Result<(), UnitError> {
+    pub fn delete_index_range(&self, timeline_id: i64, from_offset: i64) -> Result<(), UnitError> {
         let db = &self.inner.database;
         let cf = db
             .cf_handle(rocksdb::DEFAULT_COLUMN_FAMILY_NAME)
@@ -161,9 +157,10 @@ impl Storage {
     ) -> Vec<(i64, IndexEntry)> {
         let scan_start = std::time::Instant::now();
         let start_key = encode_key(timeline_id, start_offset);
-        let iter = self.inner.database.iterator(
-            rocksdb::IteratorMode::From(&start_key, rocksdb::Direction::Forward),
-        );
+        let iter = self.inner.database.iterator(rocksdb::IteratorMode::From(
+            &start_key,
+            rocksdb::Direction::Forward,
+        ));
 
         let mut results = Vec::new();
         for item in iter {
@@ -186,15 +183,13 @@ impl Storage {
         }
         if let Some(m) = crate::observability::global_metrics() {
             m.index_reads.add(1, &[]);
-            m.index_read_latency.record(scan_start.elapsed().as_secs_f64(), &[]);
+            m.index_read_latency
+                .record(scan_start.elapsed().as_secs_f64(), &[]);
         }
         results
     }
 
-    pub fn scan_by_segment_ids(
-        &self,
-        segment_ids: &HashSet<u64>,
-    ) -> Vec<((i64, i64), IndexEntry)> {
+    pub fn scan_by_segment_ids(&self, segment_ids: &HashSet<u64>) -> Vec<((i64, i64), IndexEntry)> {
         let iter = self.inner.database.iterator(rocksdb::IteratorMode::Start);
         let mut results = Vec::new();
 
@@ -274,9 +269,10 @@ impl Storage {
 
     pub fn all_segment_meta_raw(&self) -> Vec<(u64, Vec<u8>)> {
         let prefix = [SEGMENT_META_PREFIX];
-        let iter = self.inner.database.iterator(
-            rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
-        );
+        let iter = self.inner.database.iterator(rocksdb::IteratorMode::From(
+            &prefix,
+            rocksdb::Direction::Forward,
+        ));
         let mut results = Vec::new();
 
         for item in iter {

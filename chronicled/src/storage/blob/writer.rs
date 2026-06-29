@@ -112,8 +112,8 @@ impl BlobWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::blob::BlobReader;
     use crate::segment::standard::StandardSegment;
+    use crate::storage::blob::BlobReader;
     use std::path::Path;
 
     async fn make_writer(path: &Path, segment_id: u64) -> BlobWriter {

@@ -5,8 +5,6 @@ use std::io::Error;
 use std::path::PathBuf;
 
 pub struct MmapSegment {
-    #[allow(dead_code)]
-    path: PathBuf,
     file: File,
     mmap: MmapMut,
     write_offset: u64,
@@ -39,7 +37,6 @@ impl MmapSegment {
         .unwrap()?;
 
         Ok(Self {
-            path,
             file,
             mmap,
             write_offset: 0,

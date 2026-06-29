@@ -3,18 +3,13 @@ use std::net::SocketAddr;
 
 use super::auto_config::AutoConfig;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum IoMode {
     Basic,
+    #[default]
     Advanced,
     Mmap,
-}
-
-impl Default for IoMode {
-    fn default() -> Self {
-        IoMode::Advanced
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -83,7 +78,7 @@ impl Default for LogOptions {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 pub struct CompactionOptions {
     pub interval_ms: Option<u64>,
     pub write_cache_capacity_mb: Option<usize>,
@@ -91,18 +86,6 @@ pub struct CompactionOptions {
     pub l2_compaction_trigger: Option<usize>,
     #[serde(default)]
     pub offload: Option<OffloadOptions>,
-}
-
-impl Default for CompactionOptions {
-    fn default() -> Self {
-        Self {
-            interval_ms: None,
-            write_cache_capacity_mb: None,
-            l1_compaction_trigger: None,
-            l2_compaction_trigger: None,
-            offload: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -121,8 +104,12 @@ impl CompactionOptions {
             write_cache_capacity_mb: self
                 .write_cache_capacity_mb
                 .unwrap_or(auto.write_cache_capacity_mb),
-            l1_compaction_trigger: self.l1_compaction_trigger.unwrap_or(auto.l1_compaction_trigger),
-            l2_compaction_trigger: self.l2_compaction_trigger.unwrap_or(auto.l2_compaction_trigger),
+            l1_compaction_trigger: self
+                .l1_compaction_trigger
+                .unwrap_or(auto.l1_compaction_trigger),
+            l2_compaction_trigger: self
+                .l2_compaction_trigger
+                .unwrap_or(auto.l2_compaction_trigger),
             offload: self.offload.clone(),
         }
     }
@@ -137,23 +124,12 @@ pub struct OffloadOptions {
     pub region: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 pub struct IndexOptions {
     pub block_cache_mb: Option<usize>,
     pub write_buffer_mb: Option<usize>,
     pub num_levels: Option<i32>,
     pub target_file_size_mb: Option<u64>,
-}
-
-impl Default for IndexOptions {
-    fn default() -> Self {
-        Self {
-            block_cache_mb: None,
-            write_buffer_mb: None,
-            num_levels: None,
-            target_file_size_mb: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -247,7 +223,7 @@ fn default_retention_interval_secs() -> u64 {
     3600
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 pub struct UnitOptions {
     #[serde(default)]
     pub wal: WalOptions,
@@ -269,23 +245,6 @@ pub struct UnitOptions {
     pub index: IndexOptions,
     #[serde(default)]
     pub retention: RetentionOptions,
-}
-
-impl Default for UnitOptions {
-    fn default() -> Self {
-        Self {
-            wal: WalOptions::default(),
-            storage: StorageOptions::default(),
-            server: ServerOptions::default(),
-            log: LogOptions::default(),
-            catalog: catalog::CatalogOptions::default(),
-            compaction: CompactionOptions::default(),
-            segments: SegmentOptions::default(),
-            io_mode: IoMode::default(),
-            index: IndexOptions::default(),
-            retention: RetentionOptions::default(),
-        }
-    }
 }
 
 fn default_server_address() -> SocketAddr {

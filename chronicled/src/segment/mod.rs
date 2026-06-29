@@ -1,7 +1,7 @@
-pub mod standard;
 pub mod direct;
 pub mod mmap;
 pub mod record;
+pub mod standard;
 
 pub const DEFAULT_MAX_SEGMENT_SIZE: u64 = 64 * 1024 * 1024;
 

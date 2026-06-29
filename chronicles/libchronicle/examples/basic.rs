@@ -4,14 +4,15 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let catalog = Arc::new(
-        catalog::build_catalog(&catalog::CatalogOptions::default()).await?,
-    );
+    let catalog = Arc::new(catalog::build_catalog(&catalog::CatalogOptions::default()).await?);
 
     let chronicle = Chronicle::new(catalog, ChronicleOptions::new());
 
     let timeline = chronicle
-        .open_timeline("example-timeline", TimelineOptions::new().replication_factor(1))
+        .open_timeline(
+            "example-timeline",
+            TimelineOptions::new().replication_factor(1),
+        )
         .await?;
 
     // Record events
@@ -21,10 +22,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Record with key
     let o3 = timeline
-        .record(
-            Event::new(b"keyed event".to_vec())
-                .with_key(b"user-123".to_vec()),
-        )
+        .record(Event::new(b"keyed event".to_vec()).with_key(b"user-123".to_vec()))
         .await?;
     println!("recorded keyed event at offset: {}", o3.0);
 
@@ -34,10 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         timeline.record(Event::new(b"batch-2".to_vec())),
         timeline.record(Event::new(b"batch-3".to_vec())),
     );
-    println!(
-        "batch offsets: {}, {}, {}",
-        r1?.0, r2?.0, r3?.0
-    );
+    println!("batch offsets: {}, {}, {}", r1?.0, r2?.0, r3?.0);
 
     // TODO: fetch will be reimplemented with catalog-based reader
 

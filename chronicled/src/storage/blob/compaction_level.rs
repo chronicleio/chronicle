@@ -6,18 +6,21 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+use super::manager::SegmentManager;
 use crate::error::unit_error::UnitError;
 use crate::storage::index::{IndexEntry, Storage};
-use super::manager::SegmentManager;
+
+pub(crate) type TimelineOffset = (i64, i64);
+pub(crate) type IndexedEntry = (TimelineOffset, IndexEntry);
 
 struct ContiguousRun {
     segment_id: u64,
     start_offset: u64,
     total_length: u64,
-    entries: Vec<((i64, i64), u32)>,
+    entries: Vec<(TimelineOffset, u32)>,
 }
 
-fn detect_runs(group: &[((i64, i64), IndexEntry)]) -> Vec<ContiguousRun> {
+fn detect_runs(group: &[IndexedEntry]) -> Vec<ContiguousRun> {
     let mut runs = Vec::new();
     if group.is_empty() {
         return runs;
@@ -60,14 +63,13 @@ pub(crate) trait CompactionLevel: Send + Sync {
     fn segment_manager(&self) -> &Arc<SegmentManager>;
     fn index(&self) -> &Storage;
 
-    fn group_entries(
-        &self,
-        entries: Vec<((i64, i64), IndexEntry)>,
-    ) -> Vec<Vec<((i64, i64), IndexEntry)>>;
+    fn group_entries(&self, entries: Vec<IndexedEntry>) -> Vec<Vec<IndexedEntry>>;
 
     fn compact(&self) -> impl std::future::Future<Output = Result<(), UnitError>> + Send {
         async {
-            let source_segments = self.segment_manager().segments_at_level(self.source_level());
+            let source_segments = self
+                .segment_manager()
+                .segments_at_level(self.source_level());
             if source_segments.len() < self.trigger() {
                 return Ok(());
             }
@@ -106,10 +108,7 @@ pub(crate) trait CompactionLevel: Send + Sync {
 
                 for run in &runs {
                     let src_file = source_files.get(&run.segment_id).ok_or_else(|| {
-                        UnitError::Storage(format!(
-                            "segment {} file not opened",
-                            run.segment_id
-                        ))
+                        UnitError::Storage(format!("segment {} file not opened", run.segment_id))
                     })?;
 
                     let dst_start = writer.write_range_from(

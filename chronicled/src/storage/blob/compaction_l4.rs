@@ -4,9 +4,9 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::error::unit_error::UnitError;
 use super::manager::SegmentManager;
 use super::remote::RemoteStore;
+use crate::error::unit_error::UnitError;
 
 pub(crate) struct L4OffloadTask {
     pub segment_manager: Arc<SegmentManager>,
@@ -49,7 +49,8 @@ impl L4OffloadTask {
                 continue;
             }
 
-            let filename = local_path.file_name()
+            let filename = local_path
+                .file_name()
                 .and_then(|f| f.to_str())
                 .ok_or_else(|| UnitError::Storage("invalid segment path".into()))?;
 

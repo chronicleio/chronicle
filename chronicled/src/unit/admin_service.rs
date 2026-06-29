@@ -46,7 +46,8 @@ impl Admin for AdminService {
         };
 
         if let Some(m) = crate::observability::global_metrics() {
-            m.admin_latency.record(start.elapsed().as_secs_f64(), &attrs);
+            m.admin_latency
+                .record(start.elapsed().as_secs_f64(), &attrs);
         }
         Ok(Response::new(GetStatusResponse {
             state: state_str.to_string(),

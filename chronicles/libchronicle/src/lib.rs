@@ -1,12 +1,11 @@
 use std::time::Duration;
-use crate::error::ChronicleError;
 
 pub mod chronicle;
 pub mod conn;
 pub mod error;
+mod error_inner;
 pub mod metric;
 pub mod timeline;
-mod error_inner;
 
 #[derive(Debug, Clone)]
 pub struct Event {

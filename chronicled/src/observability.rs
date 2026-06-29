@@ -1,9 +1,13 @@
-use std::sync::OnceLock;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
-use opentelemetry::metrics::{Counter, Histogram, Meter, MeterProvider, ObservableGauge, UpDownCounter};
 use opentelemetry::KeyValue;
-use opentelemetry_sdk::metrics::{Aggregation, Instrument, InstrumentKind, SdkMeterProvider, Stream};
+use opentelemetry::metrics::{
+    Counter, Histogram, Meter, MeterProvider, ObservableGauge, UpDownCounter,
+};
+use opentelemetry_sdk::metrics::{
+    Aggregation, Instrument, InstrumentKind, SdkMeterProvider, Stream,
+};
 use prometheus::Registry;
 use tracing::info;
 
@@ -64,12 +68,11 @@ pub struct ServerMetrics {
 impl ServerMetrics {
     pub fn new(meter: &Meter) -> Self {
         let latency_buckets = vec![
-            0.00005, 0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005,
-            0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+            0.00005, 0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25,
+            0.5, 1.0, 2.5, 5.0, 10.0,
         ];
         let compaction_buckets = vec![
-            0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5,
-            1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
+            0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
         ];
 
         Self {
@@ -225,7 +228,13 @@ impl ServerMetrics {
         }
     }
 
-    pub fn record_compaction(&self, level: u32, duration_secs: f64, bytes_read: u64, bytes_written: u64) {
+    pub fn record_compaction(
+        &self,
+        level: u32,
+        duration_secs: f64,
+        bytes_read: u64,
+        bytes_written: u64,
+    ) {
         let attrs = [KeyValue::new("level", level as i64)];
         self.compaction_runs.add(1, &attrs);
         self.compaction_latency.record(duration_secs, &attrs);
@@ -259,7 +268,10 @@ fn dir_size(path: &str) -> u64 {
     total
 }
 
-pub fn register_disk_usage_gauge(meter: &Meter, labeled_dirs: Vec<(String, String)>) -> ObservableGauge<u64> {
+pub fn register_disk_usage_gauge(
+    meter: &Meter,
+    labeled_dirs: Vec<(String, String)>,
+) -> ObservableGauge<u64> {
     info!(dirs = ?labeled_dirs, "registering disk usage gauge");
     meter
         .u64_observable_gauge("chronicle.server.disk.usage_bytes")
@@ -290,29 +302,63 @@ pub fn register_disk_capacity_gauge(meter: &Meter, data_dir: String) -> Observab
         .build()
 }
 
-pub fn register_rocksdb_gauges(meter: &Meter, storage: crate::storage::index::Storage) -> Vec<ObservableGauge<u64>> {
+pub fn register_rocksdb_gauges(
+    meter: &Meter,
+    storage: crate::storage::index::Storage,
+) -> Vec<ObservableGauge<u64>> {
     use rocksdb::statistics::Ticker;
 
     let tickers: Vec<(Ticker, &str, &str)> = vec![
-        (Ticker::BlockCacheHit, "chronicle.rocksdb.block_cache.hits", "Block cache hits"),
-        (Ticker::BlockCacheMiss, "chronicle.rocksdb.block_cache.misses", "Block cache misses"),
-        (Ticker::BytesWritten, "chronicle.rocksdb.bytes_written", "Total bytes written to DB"),
-        (Ticker::BytesRead, "chronicle.rocksdb.bytes_read", "Total bytes read from DB"),
-        (Ticker::CompactReadBytes, "chronicle.rocksdb.compact.read_bytes", "RocksDB compaction read bytes"),
-        (Ticker::CompactWriteBytes, "chronicle.rocksdb.compact.write_bytes", "RocksDB compaction write bytes"),
-        (Ticker::BloomFilterUseful, "chronicle.rocksdb.bloom.useful", "Bloom filter useful (avoided reads)"),
+        (
+            Ticker::BlockCacheHit,
+            "chronicle.rocksdb.block_cache.hits",
+            "Block cache hits",
+        ),
+        (
+            Ticker::BlockCacheMiss,
+            "chronicle.rocksdb.block_cache.misses",
+            "Block cache misses",
+        ),
+        (
+            Ticker::BytesWritten,
+            "chronicle.rocksdb.bytes_written",
+            "Total bytes written to DB",
+        ),
+        (
+            Ticker::BytesRead,
+            "chronicle.rocksdb.bytes_read",
+            "Total bytes read from DB",
+        ),
+        (
+            Ticker::CompactReadBytes,
+            "chronicle.rocksdb.compact.read_bytes",
+            "RocksDB compaction read bytes",
+        ),
+        (
+            Ticker::CompactWriteBytes,
+            "chronicle.rocksdb.compact.write_bytes",
+            "RocksDB compaction write bytes",
+        ),
+        (
+            Ticker::BloomFilterUseful,
+            "chronicle.rocksdb.bloom.useful",
+            "Bloom filter useful (avoided reads)",
+        ),
     ];
 
-    tickers.into_iter().map(|(ticker, name, desc)| {
-        let s = storage.clone();
-        meter
-            .u64_observable_gauge(name)
-            .with_description(desc)
-            .with_callback(move |observer| {
-                observer.observe(s.ticker(ticker), &[]);
-            })
-            .build()
-    }).collect()
+    tickers
+        .into_iter()
+        .map(|(ticker, name, desc)| {
+            let s = storage.clone();
+            meter
+                .u64_observable_gauge(name)
+                .with_description(desc)
+                .with_callback(move |observer| {
+                    observer.observe(s.ticker(ticker), &[]);
+                })
+                .build()
+        })
+        .collect()
 }
 
 pub fn init_meter_provider() -> (SdkMeterProvider, Meter, Registry) {
@@ -323,12 +369,11 @@ pub fn init_meter_provider() -> (SdkMeterProvider, Meter, Registry) {
         .expect("failed to build prometheus exporter");
 
     let latency_boundaries = vec![
-        0.00005, 0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005,
-        0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+        0.00005, 0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5,
+        1.0, 2.5, 5.0, 10.0,
     ];
     let compaction_boundaries = vec![
-        0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5,
-        1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
+        0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
     ];
 
     let lb = latency_boundaries.clone();
@@ -337,14 +382,16 @@ pub fn init_meter_provider() -> (SdkMeterProvider, Meter, Registry) {
             && inst.name.contains("latency")
             && !inst.name.contains("compaction")
         {
-            Some(Stream::new()
-                .name(inst.name.clone())
-                .description(inst.description.clone())
-                .unit(inst.unit.clone())
-                .aggregation(Aggregation::ExplicitBucketHistogram {
-                    boundaries: lb.clone(),
-                    record_min_max: true,
-                }))
+            Some(
+                Stream::new()
+                    .name(inst.name.clone())
+                    .description(inst.description.clone())
+                    .unit(inst.unit.clone())
+                    .aggregation(Aggregation::ExplicitBucketHistogram {
+                        boundaries: lb.clone(),
+                        record_min_max: true,
+                    }),
+            )
         } else {
             None
         }
@@ -353,16 +400,19 @@ pub fn init_meter_provider() -> (SdkMeterProvider, Meter, Registry) {
     let cb = compaction_boundaries;
     let compaction_view = move |inst: &Instrument| -> Option<Stream> {
         if inst.kind == Some(InstrumentKind::Histogram)
-            && inst.name.contains("compaction") && inst.name.contains("latency")
+            && inst.name.contains("compaction")
+            && inst.name.contains("latency")
         {
-            Some(Stream::new()
-                .name(inst.name.clone())
-                .description(inst.description.clone())
-                .unit(inst.unit.clone())
-                .aggregation(Aggregation::ExplicitBucketHistogram {
-                    boundaries: cb.clone(),
-                    record_min_max: true,
-                }))
+            Some(
+                Stream::new()
+                    .name(inst.name.clone())
+                    .description(inst.description.clone())
+                    .unit(inst.unit.clone())
+                    .aggregation(Aggregation::ExplicitBucketHistogram {
+                        boundaries: cb.clone(),
+                        record_min_max: true,
+                    }),
+            )
         } else {
             None
         }

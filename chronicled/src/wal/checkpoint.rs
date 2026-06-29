@@ -1,5 +1,5 @@
-use crate::storage::index::Storage;
 use crate::error::unit_error::UnitError;
+use crate::storage::index::Storage;
 
 const WAL_CHECKPOINT_KEY: [u8; 1] = [0xFE];
 

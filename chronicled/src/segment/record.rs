@@ -184,6 +184,12 @@ impl RecordBatch {
     }
 }
 
+impl Default for RecordBatch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

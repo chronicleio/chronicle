@@ -1,14 +1,14 @@
+use crate::Event;
 use crate::conn::Conn;
 use crate::conn::conn_pool::ConnPool;
 use crate::error::ChronicleError;
-use crate::Event;
 use catalog::Catalog;
 use chronicle_proto::pb_catalog::Segment;
 use chronicle_proto::pb_ext::{ChunkType, FetchEventsRequest};
 use futures_util::{Stream, StreamExt};
-use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Arc;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 use tracing::warn;

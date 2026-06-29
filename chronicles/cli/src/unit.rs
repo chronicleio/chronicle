@@ -2,10 +2,10 @@ use crate::banner;
 use crate::process;
 use chronicle_unit::option::unit_options::UnitOptions;
 use chronicle_unit::unit::unit::Unit;
-use tracing::{info, warn};
 use std::io::IsTerminal;
 use std::sync::Arc;
 use std::time::Duration;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 const DEFAULT_PID_FILE: &str = "chronicle-unit.pid";
@@ -57,9 +57,7 @@ pub async fn run(action: UnitAction) -> Result<(), Box<dyn std::error::Error>> {
 
             let catalog = loop {
                 let opts = options.catalog.clone();
-                let task = tokio::spawn(async move {
-                    catalog::build_catalog(&opts).await
-                });
+                let task = tokio::spawn(async move { catalog::build_catalog(&opts).await });
                 tokio::select! {
                     result = task => match result {
                         Ok(Ok(c)) => break c,

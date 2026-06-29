@@ -1,6 +1,6 @@
 fn main() {
     let mut config = prost_build::Config::new();
-    config.bytes(&["."]);
+    config.bytes(["."]);
 
     tonic_build::configure()
         .build_client(true)

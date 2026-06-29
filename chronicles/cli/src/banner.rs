@@ -18,6 +18,10 @@ const BANNER: &str = r#"
 
 pub fn print_banner(role: &str) {
     println!("{}", BANNER);
-    println!("         Chronicle :: {} :: v{}", role, env!("CARGO_PKG_VERSION"));
+    println!(
+        "         Chronicle :: {} :: v{}",
+        role,
+        env!("CARGO_PKG_VERSION")
+    );
     println!();
 }

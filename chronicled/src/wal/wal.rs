@@ -65,10 +65,10 @@ fn discover_segments(dir: &Path) -> Vec<(u64, PathBuf)> {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let name = entry.file_name();
-            if let Some(name_str) = name.to_str() {
-                if let Some(id) = parse_segment_id(name_str) {
-                    segments.push((id, entry.path()));
-                }
+            if let Some(name_str) = name.to_str()
+                && let Some(id) = parse_segment_id(name_str)
+            {
+                segments.push((id, entry.path()));
             }
         }
     }
@@ -314,6 +314,30 @@ impl Wal {
     pub fn cancel(&self) {
         self.context.cancel();
     }
+
+    pub async fn shutdown(&self) {
+        self.cancel();
+
+        let writer_handle = self.wal_writer_handle.lock().await.take();
+        if let Some(handle) = writer_handle {
+            match handle.await {
+                Ok(()) => {}
+                Err(err) => {
+                    warn!(error = ?err, "wal writer task join error");
+                }
+            }
+        }
+
+        let syncer_handle = self.wal_syncer_handle.lock().await.take();
+        if let Some(handle) = syncer_handle {
+            match handle.await {
+                Ok(()) => {}
+                Err(err) => {
+                    warn!(error = ?err, "wal syncer task join error");
+                }
+            }
+        }
+    }
 }
 
 async fn bg_wal_writer(
@@ -339,7 +363,7 @@ async fn bg_wal_writer(
             }
             _ = batch_timer.tick() => {
                 if !pending_batch.is_empty() {
-                    let batch = std::mem::replace(&mut pending_batch, RecordBatch::new());
+                    let batch = std::mem::take(&mut pending_batch);
                     let senders = std::mem::take(&mut pending_senders);
                     flush_batch(&inner, batch, senders, &advanced_offset_tx).await;
                 }
@@ -360,7 +384,7 @@ async fn bg_wal_writer(
                 }
 
                 if pending_batch.len() >= MAX_BATCH_SIZE {
-                    let batch = std::mem::replace(&mut pending_batch, RecordBatch::new());
+                    let batch = std::mem::take(&mut pending_batch);
                     let senders = std::mem::take(&mut pending_senders);
                     flush_batch(&inner, batch, senders, &advanced_offset_tx).await;
                 }
@@ -400,9 +424,12 @@ async fn flush_batch(
     let mut state = inner.state.lock().await;
 
     if state.needs_rotation(encoded.len()) {
-        if let Err(e) = state.rotate().await {
-            warn!(error = ?e, "failed to rotate wal segment");
-            return;
+        match state.rotate().await {
+            Ok(_) => {}
+            Err(e) => {
+                warn!(error = ?e, "failed to rotate wal segment");
+                return;
+            }
         }
     }
 
@@ -447,7 +474,8 @@ async fn bg_wal_syncer(
                 let start = std::time::Instant::now();
                 inner.sync_data().await;
                 if let Some(m) = crate::observability::global_metrics() {
-                    m.wal_sync_latency.record(start.elapsed().as_secs_f64(), &[]);
+                    m.wal_sync_latency
+                        .record(start.elapsed().as_secs_f64(), &[]);
                 }
                 if let Err(err) = commit_offset_tx.send(advanced_offset) {
                     warn!(error = ?err, "no active subscriber for synced offset");

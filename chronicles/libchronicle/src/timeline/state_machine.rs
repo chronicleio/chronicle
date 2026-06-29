@@ -6,7 +6,7 @@ use crate::{Event as UserEvent, Offset, TimelineOptions};
 use backoff::future;
 use catalog::Catalog;
 use chronicle_proto::pb_catalog::{Segment, TimelineMeta, UnitInfo};
-use chronicle_proto::pb_ext::{FenceResponse, RecordEventsRequest, RecordEventsRequestItem};
+use chronicle_proto::pb_ext::{RecordEventsRequest, RecordEventsRequestItem};
 use futures_util::future::{join_all, select_all};
 use std::collections::VecDeque;
 use std::future::Future;
@@ -86,7 +86,11 @@ impl StateMachine {
         let timeline_id = state.meta.timeline_id;
 
         let task = tokio::spawn(run(
-            state, record_rx, cancel.clone(), max_batch_size, linger,
+            state,
+            record_rx,
+            cancel.clone(),
+            max_batch_size,
+            linger,
         ));
 
         Ok(Self {
@@ -107,7 +111,10 @@ impl StateMachine {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.inner
             .record_tx
-            .send(RecordRequest { event, reply: reply_tx })
+            .send(RecordRequest {
+                event,
+                reply: reply_tx,
+            })
             .await
             .map_err(|_| ChronicleError::Internal("state machine stopped".into()))?;
         reply_rx
@@ -130,10 +137,7 @@ impl StateMachine {
 // On partial failure: quarantine → find replacement → update segment → retry.
 // ---------------------------------------------------------------------------
 
-async fn broadcast<R, Op, OpFut>(
-    state: &mut State,
-    op: Op,
-) -> Vec<(UnitInfo, R)>
+async fn broadcast<R, Op, OpFut>(state: &mut State, op: Op) -> Vec<(UnitInfo, R)>
 where
     R: Send + 'static,
     Op: Fn(Arc<ConnPool>, UnitInfo, Duration) -> OpFut,
@@ -142,10 +146,13 @@ where
     let mut quarantined: VecDeque<UnitInfo> = VecDeque::new();
 
     loop {
-        let futs = state
-            .ensemble
-            .iter()
-            .map(|unit| op(state.pool.clone(), unit.clone(), state.options.request_timeout));
+        let futs = state.ensemble.iter().map(|unit| {
+            op(
+                state.pool.clone(),
+                unit.clone(),
+                state.options.request_timeout,
+            )
+        });
         let results = join_all(futs).await;
 
         let mut succeeded = Vec::new();
@@ -196,7 +203,12 @@ where
             continue;
         }
 
-        state.wm_watches = subscribe_watches(&state.ensemble, &state.pool, state.meta.timeline_id, state.meta.lra);
+        state.wm_watches = subscribe_watches(
+            &state.ensemble,
+            &state.pool,
+            state.meta.timeline_id,
+            state.meta.lra,
+        );
 
         info!(
             timeline_id = state.meta.timeline_id,
@@ -331,19 +343,16 @@ async fn recover(state: &mut State) -> Result<(), ChronicleError> {
 
     let timeline_id = state.meta.timeline_id;
     let term = state.meta.term;
-    let fence_results = broadcast(
-        state,
-        |pool, unit, timeout| async move {
-            let result = match pool.get_or_connect(&unit.address) {
-                Ok(conn) => conn
-                    .fence_with_retry(timeline_id, term, timeout)
-                    .await
-                    .map_err(|e| ChronicleError::Internal(e.to_string())),
-                Err(e) => Err(ChronicleError::Transport(e.to_string())),
-            };
-            (unit, result)
-        },
-    )
+    let fence_results = broadcast(state, |pool, unit, timeout| async move {
+        let result = match pool.get_or_connect(&unit.address) {
+            Ok(conn) => conn
+                .fence_with_retry(timeline_id, term, timeout)
+                .await
+                .map_err(|e| ChronicleError::Internal(e.to_string())),
+            Err(e) => Err(ChronicleError::Transport(e.to_string())),
+        };
+        (unit, result)
+    })
     .await;
 
     let min_lra = fence_results
@@ -370,7 +379,12 @@ async fn recover(state: &mut State) -> Result<(), ChronicleError> {
             .map_err(|e| ChronicleError::Internal(e.to_string()))?;
     }
 
-    state.wm_watches = subscribe_watches(&state.ensemble, &state.pool, state.meta.timeline_id, state.meta.lra);
+    state.wm_watches = subscribe_watches(
+        &state.ensemble,
+        &state.pool,
+        state.meta.timeline_id,
+        state.meta.lra,
+    );
 
     info!(
         timeline_id = state.meta.timeline_id,
@@ -444,7 +458,11 @@ async fn wait_watermark_advance(watches: &mut [(String, watch::Receiver<i64>)]) 
         .map(|(_, rx)| Box::pin(rx.changed()))
         .collect();
     let _ = select_all(futs).await;
-    watches.iter().map(|(_, rx)| *rx.borrow()).min().unwrap_or(-1)
+    watches
+        .iter()
+        .map(|(_, rx)| *rx.borrow())
+        .min()
+        .unwrap_or(-1)
 }
 
 fn handle_watermark_changed(state: &mut State, inflight: &mut VecDeque<InflightBatch>, lra: i64) {
@@ -522,19 +540,16 @@ async fn flush_batch(
     let max_offset = *offsets.last().unwrap();
     let request = RecordEventsRequest { items };
 
-    broadcast(
-        state,
-        |pool, unit, timeout| {
-            let request = request.clone();
-            async move {
-                let result = match pool.get_or_connect(&unit.address) {
-                    Ok(conn) => conn.send_record_with_retry(request, timeout).await,
-                    Err(e) => Err(ChronicleError::Transport(e.to_string())),
-                };
-                (unit, result)
-            }
-        },
-    )
+    broadcast(state, |pool, unit, timeout| {
+        let request = request.clone();
+        async move {
+            let result = match pool.get_or_connect(&unit.address) {
+                Ok(conn) => conn.send_record_with_retry(request, timeout).await,
+                Err(e) => Err(ChronicleError::Transport(e.to_string())),
+            };
+            (unit, result)
+        }
+    })
     .await;
 
     let callbacks: Vec<_> = offsets.into_iter().zip(replies).collect();
@@ -561,7 +576,11 @@ async fn update_segment(
             state.segment_start_offset
         },
     };
-    let expected_version = if has_records { -1 } else { state.segment_version };
+    let expected_version = if has_records {
+        -1
+    } else {
+        state.segment_version
+    };
 
     let versioned = state
         .catalog

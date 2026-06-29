@@ -1,6 +1,6 @@
+use crate::error_inner::InnerError;
 use catalog::error::CatalogError;
 use thiserror::Error;
-use crate::error_inner::InnerError;
 
 #[derive(Error, Debug, Clone)]
 pub enum ChronicleError {
@@ -41,9 +41,18 @@ impl From<tonic::Status> for ChronicleError {
     }
 }
 
-
 impl From<InnerError> for ChronicleError {
     fn from(value: InnerError) -> Self {
-        todo!()
+        match value {
+            InnerError::FenceFailed(message) => ChronicleError::ReconciliationFailed(message),
+            InnerError::Transport(message) => ChronicleError::Transport(message),
+            InnerError::InvalidTerm { expect, actual } => ChronicleError::InvalidTerm {
+                current: actual,
+                requested: expect,
+            },
+            InnerError::Catalog(error) => ChronicleError::Catalog(error),
+            InnerError::UnitNotEnough(message) => ChronicleError::UnitNotEnough(message),
+            InnerError::Canceled => ChronicleError::Canceled,
+        }
     }
 }

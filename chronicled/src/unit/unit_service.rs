@@ -69,7 +69,9 @@ impl Chronicle for UnitService {
                         let item_count = req.items.len();
 
                         // Extract timeline_id and term from first item.
-                        let (timeline_id, term) = req.items.first()
+                        let (timeline_id, term) = req
+                            .items
+                            .first()
                             .and_then(|i| i.event.as_ref())
                             .map(|e| (e.timeline_id, e.term))
                             .unwrap_or((0, 0));
@@ -83,7 +85,9 @@ impl Chronicle for UnitService {
                         let mut dispatch_failed = false;
 
                         for item in req.items {
-                            total_bytes += item.event.as_ref()
+                            total_bytes += item
+                                .event
+                                .as_ref()
                                 .and_then(|e| e.payload.as_ref())
                                 .map_or(0, |p| p.len() as u64);
 
@@ -152,7 +156,9 @@ impl Chronicle for UnitService {
                             timeline_id,
                             term: error_term,
                         };
-                        metrics.write_latency.record(start.elapsed().as_secs_f64(), &[]);
+                        metrics
+                            .write_latency
+                            .record(start.elapsed().as_secs_f64(), &[]);
                         metrics.write_bytes.add(total_bytes, &[]);
                         if tx.send(Ok(response)).await.is_err() {
                             return;
@@ -214,7 +220,9 @@ impl Chronicle for UnitService {
                             }
                         }
                         metrics.read_queue_depth.add(-1, &[]);
-                        metrics.read_latency.record(start.elapsed().as_secs_f64(), &[]);
+                        metrics
+                            .read_latency
+                            .record(start.elapsed().as_secs_f64(), &[]);
                         metrics.read_events.add(event_count, &[]);
                     }
                     Err(e) => {

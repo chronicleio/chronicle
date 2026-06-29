@@ -1,10 +1,10 @@
-use libchronicle::chronicle::{Chronicle, ChronicleOptions};
-use libchronicle::TimelineOptions;
 use futures_util::StreamExt;
+use libchronicle::TimelineOptions;
+use libchronicle::chronicle::{Chronicle, ChronicleOptions};
 use libchronicle::{Event, FetchOptions};
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::signal;
 use tokio::sync::Mutex;
@@ -86,7 +86,10 @@ impl TimelineVerifier {
             if payload.len() != payload_size {
                 self.violations.push(format!(
                     "[{}] CORRUPTION: offset {} payload size {} != expected {}",
-                    self.name, offset, payload.len(), payload_size
+                    self.name,
+                    offset,
+                    payload.len(),
+                    payload_size
                 ));
             } else if !payload[8..].iter().all(|&b| b == expected_fill) {
                 self.violations.push(format!(
@@ -97,26 +100,28 @@ impl TimelineVerifier {
         } else {
             self.violations.push(format!(
                 "[{}] CORRUPTION: offset {} payload too short ({}B)",
-                self.name, offset, payload.len()
+                self.name,
+                offset,
+                payload.len()
             ));
         }
 
-        if let Some(written) = self.written_payloads.get(&offset) {
-            if payload != written.as_slice() {
-                self.violations.push(format!(
-                    "[{}] PAYLOAD_MISMATCH: offset {} read payload differs from written \
-                     (written_len={}, read_len={}, first_diff={})",
-                    self.name,
-                    offset,
-                    written.len(),
-                    payload.len(),
-                    written
-                        .iter()
-                        .zip(payload.iter())
-                        .position(|(a, b)| a != b)
-                        .unwrap_or(written.len().min(payload.len()))
-                ));
-            }
+        if let Some(written) = self.written_payloads.get(&offset)
+            && payload != written.as_slice()
+        {
+            self.violations.push(format!(
+                "[{}] PAYLOAD_MISMATCH: offset {} read payload differs from written \
+                 (written_len={}, read_len={}, first_diff={})",
+                self.name,
+                offset,
+                written.len(),
+                payload.len(),
+                written
+                    .iter()
+                    .zip(payload.iter())
+                    .position(|(a, b)| a != b)
+                    .unwrap_or(written.len().min(payload.len()))
+            ));
         }
     }
 
@@ -183,7 +188,11 @@ pub async fn run(args: VerifyArgs) -> Result<(), Box<dyn std::error::Error>> {
         Ok(units) => {
             info!(count = units.len(), "units found in catalog");
             for u in &units {
-                let addr = u.unit.as_ref().map(|ui| ui.address.as_str()).unwrap_or("unknown");
+                let addr = u
+                    .unit
+                    .as_ref()
+                    .map(|ui| ui.address.as_str())
+                    .unwrap_or("unknown");
                 info!(address = %addr, status = ?u.status(), "unit");
             }
         }
@@ -195,12 +204,7 @@ pub async fn run(args: VerifyArgs) -> Result<(), Box<dyn std::error::Error>> {
         Err(e) => warn!(error = %e, "failed to list timelines from catalog (non-fatal)"),
     }
 
-    let chronicle = Arc::new(
-        Chronicle::new(
-            catalog,
-            ChronicleOptions::new(),
-        ),
-    );
+    let chronicle = Arc::new(Chronicle::new(catalog, ChronicleOptions::new()));
 
     info!(
         timelines = args.timelines,
@@ -223,17 +227,29 @@ pub async fn run(args: VerifyArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut timelines = Vec::new();
     for i in 0..args.timelines {
         let name = format!("verify-{}", i);
-        let timeline = match chronicle.open_timeline(&name, TimelineOptions::new()
-                .replication_factor(args.replication_factor)
-                .max_batch_size(256)
-                .linger(Duration::from_millis(5))).await {
+        let timeline = match chronicle
+            .open_timeline(
+                &name,
+                TimelineOptions::new()
+                    .replication_factor(args.replication_factor)
+                    .max_batch_size(256)
+                    .linger(Duration::from_millis(5)),
+            )
+            .await
+        {
             Ok(t) => t,
             Err(create_err) => {
                 info!(timeline = name, error = %create_err, "create failed, trying open");
-                match chronicle.open_timeline(&name, TimelineOptions::new()
-                .replication_factor(args.replication_factor)
-                .max_batch_size(256)
-                .linger(Duration::from_millis(5))).await {
+                match chronicle
+                    .open_timeline(
+                        &name,
+                        TimelineOptions::new()
+                            .replication_factor(args.replication_factor)
+                            .max_batch_size(256)
+                            .linger(Duration::from_millis(5)),
+                    )
+                    .await
+                {
                     Ok(t) => t,
                     Err(e) => {
                         error!(timeline = name, create_error = %create_err, open_error = %e, "failed to create/open timeline");
@@ -294,21 +310,27 @@ pub async fn run(args: VerifyArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     tokio::time::sleep(Duration::from_secs(3)).await;
 
-    for i in 0..args.timelines {
+    for (i, verifier) in verifiers.iter().enumerate().take(args.timelines) {
         let chronicle = chronicle.clone();
         let stats = stats.clone();
         let reading = reading.clone();
-        let verifier = verifiers[i].clone();
+        let verifier = verifier.clone();
         let payload_size = args.payload_size;
 
         handles.push(tokio::spawn(async move {
             let name = format!("verify-{}", i);
 
             let mut stream = loop {
-                match chronicle.open_timeline(&name, TimelineOptions::new()
-                .replication_factor(args.replication_factor)
-                .max_batch_size(256)
-                .linger(Duration::from_millis(5))).await {
+                match chronicle
+                    .open_timeline(
+                        &name,
+                        TimelineOptions::new()
+                            .replication_factor(args.replication_factor)
+                            .max_batch_size(256)
+                            .linger(Duration::from_millis(5)),
+                    )
+                    .await
+                {
                     Ok(t) => break t.fetch(FetchOptions::earliest()).await.unwrap(),
                     Err(_) => {
                         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -324,10 +346,11 @@ pub async fn run(args: VerifyArgs) -> Result<(), Box<dyn std::error::Error>> {
                 match stream.next().await {
                     Some(Ok(event)) => {
                         stats.read.fetch_add(1, Ordering::Relaxed);
-                        verifier
-                            .lock()
-                            .await
-                            .record_read(event.offset.unwrap_or(0), &event.payload, payload_size);
+                        verifier.lock().await.record_read(
+                            event.offset.unwrap_or(0),
+                            &event.payload,
+                            payload_size,
+                        );
                         stats.verified.fetch_add(1, Ordering::Relaxed);
                     }
                     Some(Err(e)) => {
@@ -411,9 +434,7 @@ pub async fn run(args: VerifyArgs) -> Result<(), Box<dyn std::error::Error>> {
         if verifier.violations.is_empty() {
             info!(
                 timeline = verifier.name,
-                acked,
-                read,
-                "PASS — all TLA+ invariants hold"
+                acked, read, "PASS — all TLA+ invariants hold"
             );
         } else {
             for violation in &verifier.violations {

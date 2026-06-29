@@ -42,21 +42,12 @@ fn copy_range_linux(
 
     while remaining > 0 {
         let ret = unsafe {
-            libc::copy_file_range(
-                src_fd,
-                &mut off_in,
-                dst_fd,
-                &mut off_out,
-                remaining,
-                0,
-            )
+            libc::copy_file_range(src_fd, &mut off_in, dst_fd, &mut off_out, remaining, 0)
         };
 
         if ret < 0 {
             let err = io::Error::last_os_error();
-            if err.raw_os_error() == Some(libc::ENOSYS)
-                || err.raw_os_error() == Some(libc::EXDEV)
-            {
+            if err.raw_os_error() == Some(libc::ENOSYS) || err.raw_os_error() == Some(libc::EXDEV) {
                 return copy_range_fallback(src, src_offset, dst, dst_offset, length);
             }
             return Err(err);

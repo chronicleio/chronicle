@@ -12,14 +12,14 @@ use prost::Message;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use super::remote::RemoteStore;
+use super::{BlobReader, BlobWriter};
 use crate::error::unit_error::UnitError;
 use crate::option::unit_options::IoMode;
 use crate::segment::Segment;
 use crate::segment::direct::DirectSegment;
 use crate::segment::mmap::MmapSegment;
 use crate::segment::standard::StandardSegment;
-use super::{BlobReader, BlobWriter};
-use super::remote::RemoteStore;
 use crate::storage::index::{IndexEntry, Storage};
 
 #[derive(Debug, Clone)]
@@ -65,12 +65,8 @@ impl SegmentMeta {
     fn decode(data: &[u8]) -> Option<Self> {
         let proto = pb_storage::SegmentMeta::decode(data).ok()?;
         let location = match proto.location?.kind? {
-            pb_storage::segment_location::Kind::Local(l) => {
-                SegmentLocation::Local { path: l.path }
-            }
-            pb_storage::segment_location::Kind::Remote(r) => {
-                SegmentLocation::Remote { key: r.key }
-            }
+            pb_storage::segment_location::Kind::Local(l) => SegmentLocation::Local { path: l.path },
+            pb_storage::segment_location::Kind::Remote(r) => SegmentLocation::Remote { key: r.key },
         };
         Some(SegmentMeta {
             id: proto.id,
@@ -136,7 +132,13 @@ impl SegmentManager {
         io_mode: IoMode,
         index: Storage,
     ) -> Result<Self, UnitError> {
-        Self::recover_with_remote(segments_dir, io_mode, None, DEFAULT_REMOTE_CACHE_SIZE, index)
+        Self::recover_with_remote(
+            segments_dir,
+            io_mode,
+            None,
+            DEFAULT_REMOTE_CACHE_SIZE,
+            index,
+        )
     }
 
     pub fn recover_with_remote(
@@ -146,14 +148,12 @@ impl SegmentManager {
         remote_cache_capacity: usize,
         index: Storage,
     ) -> Result<Self, UnitError> {
-        fs::create_dir_all(&segments_dir).map_err(|e| {
-            UnitError::Storage(format!("failed to create segments dir: {}", e))
-        })?;
+        fs::create_dir_all(&segments_dir)
+            .map_err(|e| UnitError::Storage(format!("failed to create segments dir: {}", e)))?;
 
         let cache_dir = segments_dir.join(".remote_cache");
-        fs::create_dir_all(&cache_dir).map_err(|e| {
-            UnitError::Storage(format!("failed to create cache dir: {}", e))
-        })?;
+        fs::create_dir_all(&cache_dir)
+            .map_err(|e| UnitError::Storage(format!("failed to create cache dir: {}", e)))?;
 
         let mut max_id = 0u64;
 
@@ -165,9 +165,7 @@ impl SegmentManager {
             let name_str = name.to_string_lossy();
 
             if let Some((level, id)) = parse_segment_filename(&name_str) {
-                let file_size = entry.metadata()
-                    .map(|m| m.len())
-                    .unwrap_or(0);
+                let file_size = entry.metadata().map(|m| m.len()).unwrap_or(0);
 
                 let seg_path = segments_dir.join(&*name_str);
                 let meta = SegmentMeta {
@@ -261,7 +259,8 @@ impl SegmentManager {
     }
 
     pub fn segments_at_level(&self, level: u32) -> Vec<SegmentMeta> {
-        self.index.all_segment_meta_raw()
+        self.index
+            .all_segment_meta_raw()
             .into_iter()
             .filter_map(|(_, data)| SegmentMeta::decode(&data))
             .filter(|m| m.level == level && matches!(m.location, SegmentLocation::Local { .. }))
@@ -297,7 +296,9 @@ impl SegmentManager {
     }
 
     pub fn cleanup_orphans(&self, referenced_ids: &std::collections::HashSet<u64>) {
-        let all_meta: Vec<u64> = self.index.all_segment_meta_raw()
+        let all_meta: Vec<u64> = self
+            .index
+            .all_segment_meta_raw()
             .into_iter()
             .map(|(id, _)| id)
             .collect();
@@ -340,7 +341,10 @@ impl SegmentManager {
                 let path = PathBuf::from(path);
                 let reader = BlobReader::open(&path)?;
                 let event = reader.read_event(entry.byte_offset, entry.length)?;
-                self.readers.write().unwrap().insert(entry.segment_id, reader);
+                self.readers
+                    .write()
+                    .unwrap()
+                    .insert(entry.segment_id, reader);
                 Ok(event)
             }
             Some(SegmentLocation::Remote { .. }) => {
@@ -358,7 +362,10 @@ impl SegmentManager {
                 let path = self.find_local_path(entry.segment_id)?;
                 let reader = BlobReader::open(&path)?;
                 let event = reader.read_event(entry.byte_offset, entry.length)?;
-                self.readers.write().unwrap().insert(entry.segment_id, reader);
+                self.readers
+                    .write()
+                    .unwrap()
+                    .insert(entry.segment_id, reader);
                 Ok(event)
             }
         }
@@ -371,21 +378,24 @@ impl SegmentManager {
             Err(e) => return Err(e),
         }
 
-        let meta = self.segment_meta(entry.segment_id)
-            .ok_or_else(|| UnitError::Storage(format!(
-                "segment {} not found", entry.segment_id
-            )))?;
+        let meta = self
+            .segment_meta(entry.segment_id)
+            .ok_or_else(|| UnitError::Storage(format!("segment {} not found", entry.segment_id)))?;
 
         let remote_key = match &meta.location {
             SegmentLocation::Remote { key } => key.clone(),
-            _ => return Err(UnitError::Storage(format!(
-                "segment {} not found as remote", entry.segment_id
-            ))),
+            _ => {
+                return Err(UnitError::Storage(format!(
+                    "segment {} not found as remote",
+                    entry.segment_id
+                )));
+            }
         };
 
-        let remote_store = self.remote_store.as_ref().ok_or_else(|| {
-            UnitError::Storage("no remote store configured".into())
-        })?;
+        let remote_store = self
+            .remote_store
+            .as_ref()
+            .ok_or_else(|| UnitError::Storage("no remote store configured".into()))?;
 
         let data = remote_store.download(&remote_key).await?;
         let cached_path = self.cache_dir.join(segment_filename(meta.level, meta.id));
@@ -396,10 +406,13 @@ impl SegmentManager {
         let event = reader.read_event(entry.byte_offset, entry.length)?;
 
         let mut cache = self.remote_cache.lock().unwrap();
-        let evicted = cache.push(entry.segment_id, CachedRemoteSegment {
-            reader,
-            cached_path,
-        });
+        let evicted = cache.push(
+            entry.segment_id,
+            CachedRemoteSegment {
+                reader,
+                cached_path,
+            },
+        );
         if let Some((_, old)) = evicted {
             let _ = fs::remove_file(&old.cached_path);
         }
@@ -408,16 +421,19 @@ impl SegmentManager {
     }
 
     fn find_local_path(&self, id: u64) -> Result<PathBuf, UnitError> {
-        if let Some(path) = self.segment_path_for(id) {
-            if path.exists() {
-                return Ok(path);
-            }
+        if let Some(path) = self.segment_path_for(id)
+            && path.exists()
+        {
+            return Ok(path);
         }
         let legacy = self.segments_dir.join(format!("segment_{:06}.cseg", id));
         if legacy.exists() {
             return Ok(legacy);
         }
-        Err(UnitError::Storage(format!("segment file not found for id {}", id)))
+        Err(UnitError::Storage(format!(
+            "segment file not found for id {}",
+            id
+        )))
     }
 }
 
@@ -430,7 +446,8 @@ mod tests {
         Storage::new(StorageOptions {
             path: dir.join("index").to_string_lossy().to_string(),
             index: None,
-        }).unwrap()
+        })
+        .unwrap()
     }
 
     #[test]
@@ -455,7 +472,9 @@ mod tests {
             level: 2,
             size: 1024,
             entry_count: 10,
-            location: SegmentLocation::Local { path: "/tmp/segments/L2_000042.cseg".into() },
+            location: SegmentLocation::Local {
+                path: "/tmp/segments/L2_000042.cseg".into(),
+            },
             created_at: 1000,
         };
         let encoded = local.encode();
@@ -463,31 +482,34 @@ mod tests {
         assert_eq!(decoded.level, 2);
         assert_eq!(decoded.size, 1024);
         assert_eq!(decoded.entry_count, 10);
-        assert!(matches!(decoded.location, SegmentLocation::Local { ref path } if path == "/tmp/segments/L2_000042.cseg"));
+        assert!(
+            matches!(decoded.location, SegmentLocation::Local { ref path } if path == "/tmp/segments/L2_000042.cseg")
+        );
 
         let remote = SegmentMeta {
             id: 7,
             level: 3,
             size: 2048,
             entry_count: 20,
-            location: SegmentLocation::Remote { key: "chronicle/segments/L3_000007.cseg".into() },
+            location: SegmentLocation::Remote {
+                key: "chronicle/segments/L3_000007.cseg".into(),
+            },
             created_at: 2000,
         };
         let encoded = remote.encode();
         let decoded = SegmentMeta::decode(&encoded).unwrap();
         assert_eq!(decoded.level, 3);
-        assert!(matches!(decoded.location, SegmentLocation::Remote { key } if key == "chronicle/segments/L3_000007.cseg"));
+        assert!(
+            matches!(decoded.location, SegmentLocation::Remote { key } if key == "chronicle/segments/L3_000007.cseg")
+        );
     }
 
     #[test]
     fn test_segment_manager_recover_empty() {
         let dir = tempfile::tempdir().unwrap();
         let index = test_index(dir.path());
-        let mgr = SegmentManager::recover(
-            dir.path().join("segments"),
-            IoMode::Basic,
-            index,
-        ).unwrap();
+        let mgr =
+            SegmentManager::recover(dir.path().join("segments"), IoMode::Basic, index).unwrap();
         assert_eq!(mgr.next_segment_id.load(Ordering::Relaxed), 0);
         assert!(mgr.segments_at_level(0).is_empty());
     }
@@ -496,11 +518,8 @@ mod tests {
     async fn test_segment_manager_write_and_read() {
         let dir = tempfile::tempdir().unwrap();
         let index = test_index(dir.path());
-        let mgr = SegmentManager::recover(
-            dir.path().join("segments"),
-            IoMode::Basic,
-            index,
-        ).unwrap();
+        let mgr =
+            SegmentManager::recover(dir.path().join("segments"), IoMode::Basic, index).unwrap();
 
         let event = Event {
             timeline_id: 5,
@@ -535,11 +554,8 @@ mod tests {
 
         {
             let index = test_index(dir.path());
-            let mgr = SegmentManager::recover(
-                dir.path().join("segments"),
-                IoMode::Basic,
-                index,
-            ).unwrap();
+            let mgr =
+                SegmentManager::recover(dir.path().join("segments"), IoMode::Basic, index).unwrap();
             let writer = mgr.new_writer().await.unwrap();
             writer.finish().await.unwrap();
             let writer = mgr.new_writer().await.unwrap();
@@ -547,11 +563,8 @@ mod tests {
         }
 
         let index = test_index(dir.path());
-        let mgr = SegmentManager::recover(
-            dir.path().join("segments"),
-            IoMode::Basic,
-            index,
-        ).unwrap();
+        let mgr =
+            SegmentManager::recover(dir.path().join("segments"), IoMode::Basic, index).unwrap();
         assert_eq!(mgr.next_segment_id.load(Ordering::Relaxed), 2);
         assert_eq!(mgr.segments_at_level(0).len(), 2);
     }
@@ -560,11 +573,8 @@ mod tests {
     async fn test_segment_manager_level_aware_writer() {
         let dir = tempfile::tempdir().unwrap();
         let index = test_index(dir.path());
-        let mgr = SegmentManager::recover(
-            dir.path().join("segments"),
-            IoMode::Basic,
-            index,
-        ).unwrap();
+        let mgr =
+            SegmentManager::recover(dir.path().join("segments"), IoMode::Basic, index).unwrap();
 
         let writer = mgr.new_writer_at_level(1).await.unwrap();
         let id = writer.segment_id();
@@ -574,18 +584,20 @@ mod tests {
         assert_eq!(mgr.segments_at_level(0).len(), 0);
 
         let path = mgr.segment_path_for(id).unwrap();
-        assert!(path.file_name().unwrap().to_string_lossy().starts_with("L1_"));
+        assert!(
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("L1_")
+        );
     }
 
     #[tokio::test]
     async fn test_segment_manager_remove_segments() {
         let dir = tempfile::tempdir().unwrap();
         let index = test_index(dir.path());
-        let mgr = SegmentManager::recover(
-            dir.path().join("segments"),
-            IoMode::Basic,
-            index,
-        ).unwrap();
+        let mgr =
+            SegmentManager::recover(dir.path().join("segments"), IoMode::Basic, index).unwrap();
 
         let w1 = mgr.new_writer().await.unwrap();
         let id1 = w1.segment_id();
@@ -607,11 +619,8 @@ mod tests {
     async fn test_segment_manager_mark_remote() {
         let dir = tempfile::tempdir().unwrap();
         let index = test_index(dir.path());
-        let mgr = SegmentManager::recover(
-            dir.path().join("segments"),
-            IoMode::Basic,
-            index,
-        ).unwrap();
+        let mgr =
+            SegmentManager::recover(dir.path().join("segments"), IoMode::Basic, index).unwrap();
 
         let event = Event {
             timeline_id: 1,
@@ -644,11 +653,8 @@ mod tests {
     async fn test_segment_manager_mmap_write_and_read() {
         let dir = tempfile::tempdir().unwrap();
         let index = test_index(dir.path());
-        let mgr = SegmentManager::recover(
-            dir.path().join("segments"),
-            IoMode::Mmap,
-            index,
-        ).unwrap();
+        let mgr =
+            SegmentManager::recover(dir.path().join("segments"), IoMode::Mmap, index).unwrap();
 
         let event = Event {
             timeline_id: 7,
@@ -687,20 +693,24 @@ mod tests {
             None,
             2,
             index,
-        ).unwrap();
+        )
+        .unwrap();
 
         let mut paths = Vec::new();
         for i in 0..3u64 {
             let cached_path = mgr.cache_dir.join(format!("cached_{}.cseg", i));
-            fs::write(&cached_path, &[0u8; 10]).unwrap();
+            fs::write(&cached_path, [0u8; 10]).unwrap();
             let reader = BlobReader::open(&cached_path).unwrap();
             paths.push(cached_path.clone());
 
             let mut cache = mgr.remote_cache.lock().unwrap();
-            let evicted = cache.push(i, CachedRemoteSegment {
-                reader,
-                cached_path,
-            });
+            let evicted = cache.push(
+                i,
+                CachedRemoteSegment {
+                    reader,
+                    cached_path,
+                },
+            );
             if let Some((_, old)) = evicted {
                 let _ = fs::remove_file(&old.cached_path);
             }
@@ -728,7 +738,9 @@ mod tests {
             level: 2,
             size: 4096,
             entry_count: 50,
-            location: SegmentLocation::Local { path: "/tmp/L2_000001.cseg".into() },
+            location: SegmentLocation::Local {
+                path: "/tmp/L2_000001.cseg".into(),
+            },
             created_at: 3000,
         };
         index.put_segment_meta_raw(1, &meta.encode()).unwrap();
@@ -738,10 +750,14 @@ mod tests {
             level: 3,
             size: 8192,
             entry_count: 100,
-            location: SegmentLocation::Remote { key: "s3/key".into() },
+            location: SegmentLocation::Remote {
+                key: "s3/key".into(),
+            },
             created_at: 4000,
         };
-        index.put_segment_meta_raw(2, &remote_meta.encode()).unwrap();
+        index
+            .put_segment_meta_raw(2, &remote_meta.encode())
+            .unwrap();
 
         let retrieved = index.get_segment_meta_raw(1).unwrap();
         let decoded = SegmentMeta::decode(&retrieved).unwrap();

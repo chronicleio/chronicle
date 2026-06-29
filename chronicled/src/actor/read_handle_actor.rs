@@ -76,16 +76,14 @@ impl ReadActor {
                                 if !sent_first {
                                     sent_first = true;
                                     ChunkType::First
-                                } else {
-                                    ChunkType::Middle
-                                }
                             } else {
-                                if !sent_first {
-                                    ChunkType::Full
-                                } else {
-                                    ChunkType::Last
-                                }
-                            };
+                                ChunkType::Middle
+                            }
+                        } else if !sent_first {
+                            ChunkType::Full
+                        } else {
+                            ChunkType::Last
+                        };
 
                             let res = FetchEventsResponse {
                                 code: StatusCode::Ok.into(),

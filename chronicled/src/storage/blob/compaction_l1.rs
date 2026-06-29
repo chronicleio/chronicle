@@ -7,12 +7,12 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+use super::manager::SegmentManager;
 use crate::error::unit_error::UnitError;
 use crate::storage::index::{IndexEntry, Storage};
 use crate::storage::write_cache::WriteCache;
 use crate::wal::checkpoint::{self, WalCheckpoint};
 use crate::wal::wal::Wal;
-use super::manager::SegmentManager;
 
 pub(crate) struct L1FlushTask {
     pub write_cache: WriteCache,
@@ -87,7 +87,8 @@ impl L1FlushTask {
         let entry_count = writer.entry_count();
         writer.finish().await?;
 
-        self.segment_manager.update_meta(segment_id, size, entry_count);
+        self.segment_manager
+            .update_meta(segment_id, size, entry_count);
         self.index.put_index_batch(&index_entries)?;
         self.write_cache.clear_sealed();
 
@@ -99,7 +100,11 @@ impl L1FlushTask {
             } else {
                 match wal.trim(current_seg).await {
                     Ok(trimmed) if trimmed > 0 => {
-                        info!(trimmed, checkpoint_segment = current_seg, "wal segments trimmed");
+                        info!(
+                            trimmed,
+                            checkpoint_segment = current_seg,
+                            "wal segments trimmed"
+                        );
                     }
                     Err(e) => {
                         warn!(error = ?e, "failed to trim WAL segments");
@@ -115,7 +120,11 @@ impl L1FlushTask {
             m.write_cache_seals.add(1, &[]);
         }
 
-        info!(segment_id = segment_id, entries = entries_count, "L1 flush complete");
+        info!(
+            segment_id = segment_id,
+            entries = entries_count,
+            "L1 flush complete"
+        );
 
         Ok(())
     }

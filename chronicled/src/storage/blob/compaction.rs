@@ -5,13 +5,13 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-use super::compaction_level::CompactionLevel;
-use super::manager::SegmentManager;
-use super::remote::RemoteStore;
 use super::compaction_l1::L1FlushTask;
 use super::compaction_l2::L2MergeTask;
 use super::compaction_l3::L3SplitTask;
 use super::compaction_l4::L4OffloadTask;
+use super::compaction_level::CompactionLevel;
+use super::manager::SegmentManager;
+use super::remote::RemoteStore;
 use crate::storage::index::Storage;
 use crate::storage::write_cache::WriteCache;
 use crate::wal::wal::Wal;
@@ -20,18 +20,32 @@ pub struct CompactionPipeline {
     handles: Vec<JoinHandle<()>>,
 }
 
+pub struct CompactionPipelineConfig {
+    pub write_cache: WriteCache,
+    pub segment_manager: Arc<SegmentManager>,
+    pub index: Storage,
+    pub context: CancellationToken,
+    pub interval: Duration,
+    pub l1_compaction_trigger: usize,
+    pub l2_compaction_trigger: usize,
+    pub remote_store: Option<Arc<dyn RemoteStore>>,
+    pub wal: Option<Wal>,
+}
+
 impl CompactionPipeline {
-    pub fn spawn(
-        write_cache: WriteCache,
-        segment_manager: Arc<SegmentManager>,
-        index: Storage,
-        context: CancellationToken,
-        interval: Duration,
-        l1_compaction_trigger: usize,
-        l2_compaction_trigger: usize,
-        remote_store: Option<Arc<dyn RemoteStore>>,
-        wal: Option<Wal>,
-    ) -> Self {
+    pub fn spawn(config: CompactionPipelineConfig) -> Self {
+        let CompactionPipelineConfig {
+            write_cache,
+            segment_manager,
+            index,
+            context,
+            interval,
+            l1_compaction_trigger,
+            l2_compaction_trigger,
+            remote_store,
+            wal,
+        } = config;
+
         let flush_notify = write_cache.flush_notify();
 
         let l1_handle = {
@@ -114,11 +128,11 @@ impl CompactionPipeline {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::compaction_level::CompactionLevel;
-    use chronicle_proto::pb_ext::Event;
+    use super::*;
     use crate::option::unit_options::IoMode;
     use crate::storage::index::StorageOptions;
+    use chronicle_proto::pb_ext::Event;
 
     struct TestHarness {
         write_cache: WriteCache,
@@ -129,11 +143,7 @@ mod tests {
         l3: L3SplitTask,
     }
 
-    fn setup_test(
-        dir: &std::path::Path,
-        l1_trigger: usize,
-        l2_trigger: usize,
-    ) -> TestHarness {
+    fn setup_test(dir: &std::path::Path, l1_trigger: usize, l2_trigger: usize) -> TestHarness {
         let segments_dir = dir.join("segments");
         let index_dir = dir.join("index");
 
@@ -143,9 +153,8 @@ mod tests {
             index: None,
         })
         .unwrap();
-        let segment_manager = Arc::new(
-            SegmentManager::recover(segments_dir, IoMode::Basic, index.clone()).unwrap(),
-        );
+        let segment_manager =
+            Arc::new(SegmentManager::recover(segments_dir, IoMode::Basic, index.clone()).unwrap());
 
         let flush_notify = write_cache.flush_notify();
 
@@ -260,7 +269,11 @@ mod tests {
                         timeline_id: timeline,
                         term: 1,
                         offset,
-                        payload: Some(format!("t{}_b{}_{}", timeline, batch, i).into_bytes().into()),
+                        payload: Some(
+                            format!("t{}_b{}_{}", timeline, batch, i)
+                                .into_bytes()
+                                .into(),
+                        ),
                         crc32: None,
                         timestamp: offset * 100,
                         schema_id: 0,
@@ -304,7 +317,11 @@ mod tests {
 
         for timeline in 1..=3i64 {
             let entries = h.index.scan_index(timeline, 0, 100);
-            assert!(!entries.is_empty(), "timeline {} should have entries", timeline);
+            assert!(
+                !entries.is_empty(),
+                "timeline {} should have entries",
+                timeline
+            );
             for (_, entry) in &entries {
                 let event = h.segment_manager.read_event(entry).unwrap();
                 assert_eq!(event.timeline_id, timeline);
@@ -322,7 +339,8 @@ mod tests {
             let index = Storage::new(StorageOptions {
                 path: index_dir.to_string_lossy().to_string(),
                 index: None,
-            }).unwrap();
+            })
+            .unwrap();
             let mgr = SegmentManager::recover(segments_dir.clone(), IoMode::Basic, index).unwrap();
             let w = mgr.new_writer_at_level(1).await.unwrap();
             w.finish().await.unwrap();
@@ -335,7 +353,8 @@ mod tests {
         let index = Storage::new(StorageOptions {
             path: index_dir.to_string_lossy().to_string(),
             index: None,
-        }).unwrap();
+        })
+        .unwrap();
         let mgr = SegmentManager::recover(segments_dir, IoMode::Basic, index).unwrap();
         assert_eq!(mgr.segments_at_level(1).len(), 1);
         assert_eq!(mgr.segments_at_level(2).len(), 1);
@@ -391,23 +410,22 @@ mod tests {
             index: None,
         })
         .unwrap();
-        let segment_manager = Arc::new(
-            SegmentManager::recover(segments_dir, IoMode::Basic, index.clone()).unwrap(),
-        );
+        let segment_manager =
+            Arc::new(SegmentManager::recover(segments_dir, IoMode::Basic, index.clone()).unwrap());
 
         let context = CancellationToken::new();
 
-        let pipeline = CompactionPipeline::spawn(
-            write_cache.clone(),
-            segment_manager.clone(),
-            index.clone(),
-            context.clone(),
-            Duration::from_millis(50),
-            2,
-            2,
-            None,
-            None,
-        );
+        let pipeline = CompactionPipeline::spawn(CompactionPipelineConfig {
+            write_cache: write_cache.clone(),
+            segment_manager: segment_manager.clone(),
+            index: index.clone(),
+            context: context.clone(),
+            interval: Duration::from_millis(50),
+            l1_compaction_trigger: 2,
+            l2_compaction_trigger: 2,
+            remote_store: None,
+            wal: None,
+        });
 
         for i in 0..3 {
             let event = Event {

@@ -61,7 +61,9 @@ impl RemoteStore for S3RemoteStore {
     async fn upload(&self, local_path: &Path, key: &str) -> Result<(), UnitError> {
         let body = aws_sdk_s3::primitives::ByteStream::from_path(local_path)
             .await
-            .map_err(|e| UnitError::Storage(format!("failed to read segment file for upload: {}", e)))?;
+            .map_err(|e| {
+                UnitError::Storage(format!("failed to read segment file for upload: {}", e))
+            })?;
 
         self.client
             .put_object()
@@ -76,7 +78,8 @@ impl RemoteStore for S3RemoteStore {
     }
 
     async fn download(&self, key: &str) -> Result<Vec<u8>, UnitError> {
-        let resp = self.client
+        let resp = self
+            .client
             .get_object()
             .bucket(&self.bucket)
             .key(key)
@@ -84,7 +87,8 @@ impl RemoteStore for S3RemoteStore {
             .await
             .map_err(|e| UnitError::Storage(format!("S3 download failed: {}", e)))?;
 
-        let data = resp.body
+        let data = resp
+            .body
             .collect()
             .await
             .map_err(|e| UnitError::Storage(format!("S3 body read failed: {}", e)))?

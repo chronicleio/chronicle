@@ -12,6 +12,12 @@ impl TimelineState {
     }
 }
 
+impl Default for TimelineState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub struct TimelineStateManager {
     states: DashMap<i64, TimelineState>,
 }
@@ -37,10 +43,7 @@ impl TimelineStateManager {
     }
 
     pub fn fence(&self, timeline_id: i64, new_term: i64) -> Result<i64, i64> {
-        let mut entry = self
-            .states
-            .entry(timeline_id)
-            .or_insert_with(TimelineState::new);
+        let mut entry = self.states.entry(timeline_id).or_default();
         let state = entry.value_mut();
 
         if new_term <= state.term {
@@ -52,10 +55,7 @@ impl TimelineStateManager {
     }
 
     pub fn update_lra(&self, timeline_id: i64, lra: i64) {
-        let mut entry = self
-            .states
-            .entry(timeline_id)
-            .or_insert_with(TimelineState::new);
+        let mut entry = self.states.entry(timeline_id).or_default();
         let state = entry.value_mut();
         if lra > state.lra {
             state.lra = lra;
@@ -64,6 +64,12 @@ impl TimelineStateManager {
 
     pub fn get_state(&self, timeline_id: i64) -> Option<TimelineState> {
         self.states.get(&timeline_id).map(|s| s.clone())
+    }
+}
+
+impl Default for TimelineStateManager {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

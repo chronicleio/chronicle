@@ -1,4 +1,5 @@
 pub mod checkpoint;
+#[allow(clippy::module_inception)]
 pub mod wal;
 
 pub use crate::segment::Segment;

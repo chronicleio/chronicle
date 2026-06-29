@@ -150,13 +150,7 @@ mod tests {
         }
     }
 
-    fn reg_with_load(
-        addr: &str,
-        zone: &str,
-        cpu: f64,
-        mem: f64,
-        disk: f64,
-    ) -> UnitRegistration {
+    fn reg_with_load(addr: &str, zone: &str, cpu: f64, mem: f64, disk: f64) -> UnitRegistration {
         UnitRegistration {
             unit: Some(UnitInfo {
                 id: addr.into(),
@@ -217,10 +211,14 @@ mod tests {
     fn include_skips_non_writable() {
         let mut b = reg("b", "zone-b");
         b.status = UnitStatus::Readonly as i32;
-        let units = vec![reg("a", "zone-a"), b, reg("c", "zone-c"), reg("d", "zone-d")];
+        let units = vec![
+            reg("a", "zone-a"),
+            b,
+            reg("c", "zone-c"),
+            reg("d", "zone-d"),
+        ];
         // rf = 1 + 1 = 2, include b but b is readonly
-        let result =
-            select_ensemble(&units, &include(&["b"]), &exclude(&["placeholder"])).unwrap();
+        let result = select_ensemble(&units, &include(&["b"]), &exclude(&["placeholder"])).unwrap();
         assert!(!result.iter().any(|u| u.address == "b"));
         assert_eq!(result.len(), 2);
     }
@@ -235,8 +233,7 @@ mod tests {
             reg("c1", "zone-c"),
         ];
         // rf = 0 + 3 = 3
-        let result =
-            select_ensemble(&units, &include(&[]), &exclude(&["x", "y", "z"])).unwrap();
+        let result = select_ensemble(&units, &include(&[]), &exclude(&["x", "y", "z"])).unwrap();
         let zones: Vec<&str> = result
             .iter()
             .map(|ui| {
@@ -258,19 +255,14 @@ mod tests {
             reg_with_load("other", "zone-b", 0.2, 0.2, 0.1),
         ];
         // rf = 0 + 2 = 2
-        let result =
-            select_ensemble(&units, &include(&[]), &exclude(&["x", "y"])).unwrap();
+        let result = select_ensemble(&units, &include(&[]), &exclude(&["x", "y"])).unwrap();
         assert!(result.iter().any(|u| u.address == "cold"));
         assert!(result.iter().any(|u| u.address == "other"));
     }
 
     #[test]
     fn respects_exclude() {
-        let units = vec![
-            reg("a", "zone-a"),
-            reg("b", "zone-b"),
-            reg("c", "zone-c"),
-        ];
+        let units = vec![reg("a", "zone-a"), reg("b", "zone-b"), reg("c", "zone-c")];
         // rf = 0 + 2 = 2, exclude "a"
         let result =
             select_ensemble(&units, &include(&[]), &exclude(&["a", "placeholder"])).unwrap();
@@ -296,14 +288,9 @@ mod tests {
 
     #[test]
     fn single_zone_fallback() {
-        let units = vec![
-            reg("a", "zone-a"),
-            reg("b", "zone-a"),
-            reg("c", "zone-a"),
-        ];
+        let units = vec![reg("a", "zone-a"), reg("b", "zone-a"), reg("c", "zone-a")];
         // rf = 0 + 3 = 3
-        let result =
-            select_ensemble(&units, &include(&[]), &exclude(&["x", "y", "z"])).unwrap();
+        let result = select_ensemble(&units, &include(&[]), &exclude(&["x", "y", "z"])).unwrap();
         assert_eq!(result.len(), 3);
     }
 }

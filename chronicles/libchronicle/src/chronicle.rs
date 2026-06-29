@@ -8,19 +8,10 @@ use opentelemetry::metrics::Meter;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[derive(Default)]
 pub struct ChronicleOptions {
     pub(crate) conn_opts: ConnOptions,
-    #[allow(dead_code)]
-    meter: Option<Meter>,
-}
-
-impl Default for ChronicleOptions {
-    fn default() -> Self {
-        Self {
-            conn_opts: ConnOptions::default(),
-            meter: None,
-        }
-    }
+    _meter: Option<Meter>,
 }
 
 impl ChronicleOptions {
@@ -54,7 +45,7 @@ impl ChronicleOptions {
     }
 
     pub fn meter(mut self, meter: Meter) -> Self {
-        self.meter = Some(meter);
+        self._meter = Some(meter);
         self
     }
 }

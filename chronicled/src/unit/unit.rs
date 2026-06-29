@@ -1,30 +1,30 @@
-use crate::unit::admin_service::{AdminService, STATE_WRITABLE, STATE_READONLY};
 use crate::actor::read_handle_group::ReadHandleGroup;
 use crate::actor::write_handle_group::WriteActorGroup;
 use crate::error::unit_error::UnitError;
 use crate::observability::{self, ServerMetrics};
 use crate::option::auto_config::{AutoConfig, SystemEnv};
 use crate::option::unit_options::{ServerOptions, UnitOptions};
-use crate::storage::blob::compaction::CompactionPipeline;
+use crate::storage::blob::compaction::{CompactionPipeline, CompactionPipelineConfig};
 use crate::storage::blob::manager::SegmentManager;
-use crate::storage::level_iterator::LevelIterator;
 use crate::storage::index::{Storage, StorageOptions};
+use crate::storage::level_iterator::LevelIterator;
 use crate::storage::retention::RetentionManager;
 use crate::storage::write_cache::WriteCache;
+use crate::unit::admin_service::{AdminService, STATE_READONLY, STATE_WRITABLE};
 use crate::unit::timeline_state::TimelineStateManager;
 use crate::unit::unit_service::UnitService;
 use crate::wal::checkpoint;
 use crate::wal::wal::{Wal, WalOptions};
 use catalog::Catalog;
+use chronicle_proto::pb_admin::admin_server::AdminServer;
 use chronicle_proto::pb_catalog::{UnitInfo, UnitRegistration, UnitStatus};
 use chronicle_proto::pb_ext::Event;
-use chronicle_proto::pb_admin::admin_server::AdminServer;
 use chronicle_proto::pb_ext::chronicle_server::ChronicleServer;
 use futures_util::StreamExt;
 use prost::Message;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -52,10 +52,7 @@ pub struct Unit {
 }
 
 impl Unit {
-    pub async fn new(
-        options: UnitOptions,
-        catalog: Arc<Catalog>,
-    ) -> Result<Self, UnitError> {
+    pub async fn new(options: UnitOptions, catalog: Arc<Catalog>) -> Result<Self, UnitError> {
         info!("unit initializing");
         let context = CancellationToken::new();
 
@@ -76,12 +73,18 @@ impl Unit {
         info!(path = %options.storage.dir, "storage index opened");
 
         let mut observable_gauges = observability::register_rocksdb_gauges(&meter, storage.clone());
-        observable_gauges.push(observability::register_disk_usage_gauge(&meter, vec![
-            ("wal".to_string(), options.wal.dir.clone()),
-            ("index".to_string(), options.storage.dir.clone()),
-            ("blob".to_string(), options.segments.dir.clone()),
-        ]));
-        observable_gauges.push(observability::register_disk_capacity_gauge(&meter, options.storage.dir.clone()));
+        observable_gauges.push(observability::register_disk_usage_gauge(
+            &meter,
+            vec![
+                ("wal".to_string(), options.wal.dir.clone()),
+                ("index".to_string(), options.storage.dir.clone()),
+                ("blob".to_string(), options.segments.dir.clone()),
+            ],
+        ));
+        observable_gauges.push(observability::register_disk_capacity_gauge(
+            &meter,
+            options.storage.dir.clone(),
+        ));
 
         let wal = Wal::new(WalOptions {
             dir: options.wal.dir.clone(),
@@ -119,7 +122,10 @@ impl Unit {
         info!(dir = %options.segments.dir, "segment manager recovered");
 
         let wal_checkpoint = checkpoint::read_checkpoint(&storage);
-        info!(checkpoint_segment = wal_checkpoint.segment_id, "wal checkpoint loaded");
+        info!(
+            checkpoint_segment = wal_checkpoint.segment_id,
+            "wal checkpoint loaded"
+        );
 
         info!("replaying wal into write cache");
         let mut stream = wal.read_stream_from(wal_checkpoint.segment_id).await;
@@ -162,17 +168,17 @@ impl Unit {
             merged_reader,
         ));
 
-        let compaction_pipeline = CompactionPipeline::spawn(
+        let compaction_pipeline = CompactionPipeline::spawn(CompactionPipelineConfig {
             write_cache,
-            segment_manager.clone(),
-            storage.clone(),
-            context.clone(),
-            Duration::from_millis(resolved_compaction.interval_ms),
-            resolved_compaction.l1_compaction_trigger,
-            resolved_compaction.l2_compaction_trigger,
+            segment_manager: segment_manager.clone(),
+            index: storage.clone(),
+            context: context.clone(),
+            interval: Duration::from_millis(resolved_compaction.interval_ms),
+            l1_compaction_trigger: resolved_compaction.l1_compaction_trigger,
+            l2_compaction_trigger: resolved_compaction.l2_compaction_trigger,
             remote_store,
-            Some(wal.clone()),
-        );
+            wal: Some(wal.clone()),
+        });
         info!(
             interval_ms = resolved_compaction.interval_ms,
             "compaction pipeline started"
@@ -181,7 +187,11 @@ impl Unit {
         let retention_manager = options.retention.ttl_hours.map(|ttl_hours| {
             let ttl_ms = ttl_hours as i64 * 3600 * 1000;
             let interval = Duration::from_secs(options.retention.interval_secs);
-            info!(ttl_hours, interval_secs = options.retention.interval_secs, "retention manager started");
+            info!(
+                ttl_hours,
+                interval_secs = options.retention.interval_secs,
+                "retention manager started"
+            );
             RetentionManager::spawn(
                 segment_manager.clone(),
                 storage.clone(),
@@ -193,7 +203,13 @@ impl Unit {
 
         let unit_state = Arc::new(AtomicU8::new(STATE_WRITABLE));
 
-        let unit_service = UnitService::new(write_group, read_group, timeline_state.clone(), unit_state.clone(), metrics);
+        let unit_service = UnitService::new(
+            write_group,
+            read_group,
+            timeline_state.clone(),
+            unit_state.clone(),
+            metrics,
+        );
 
         let admin_service = AdminService {
             wal: wal.clone(),
@@ -244,7 +260,8 @@ impl Unit {
                 Ok(()) => {
                     if let Some(m) = observability::global_metrics() {
                         m.catalog_operations.add(1, &cat_attrs);
-                        m.catalog_latency.record(cat_start.elapsed().as_secs_f64(), &cat_attrs);
+                        m.catalog_latency
+                            .record(cat_start.elapsed().as_secs_f64(), &cat_attrs);
                     }
                     info!(address = %address, "unit registered in catalog");
                     last_err = None;
@@ -254,7 +271,8 @@ impl Unit {
                     if let Some(m) = observability::global_metrics() {
                         m.catalog_operations.add(1, &cat_attrs);
                         m.catalog_errors.add(1, &cat_attrs);
-                        m.catalog_latency.record(cat_start.elapsed().as_secs_f64(), &cat_attrs);
+                        m.catalog_latency
+                            .record(cat_start.elapsed().as_secs_f64(), &cat_attrs);
                     }
                     warn!(attempt, error = %e, "catalog registration failed, retrying");
                     last_err = Some(e);
@@ -263,7 +281,10 @@ impl Unit {
             }
         }
         if let Some(e) = last_err {
-            return Err(UnitError::Unavailable(format!("catalog registration failed after retries: {}", e)));
+            return Err(UnitError::Unavailable(format!(
+                "catalog registration failed after retries: {}",
+                e
+            )));
         }
 
         Ok(Self {
@@ -284,13 +305,15 @@ impl Unit {
     pub async fn stop(self) {
         info!("unit shutting down");
 
-        if let Err(err) = self.catalog.unregister_unit(&self.address, &self.zone).await {
+        if let Err(err) = self
+            .catalog
+            .unregister_unit(&self.address, &self.zone)
+            .await
+        {
             warn!(error = ?err, address = %self.address, "failed to unregister unit from catalog");
         } else {
             info!(address = %self.address, "unit unregistered from catalog");
         }
-
-        self.wal.cancel();
 
         self.context.cancel();
 
@@ -304,6 +327,7 @@ impl Unit {
         if let Err(err) = self.external_handle.await {
             error!(error = ?err, "unexpected error closing external service");
         }
+        self.wal.shutdown().await;
         info!("unit stopped");
     }
 }
@@ -321,10 +345,8 @@ fn bg_start_external_service(
             .set_serving::<ChronicleServer<UnitService>>()
             .await;
 
-        let metrics_addr = std::net::SocketAddr::new(
-            options.bind_address.ip(),
-            options.bind_address.port() + 1,
-        );
+        let metrics_addr =
+            std::net::SocketAddr::new(options.bind_address.ip(), options.bind_address.port() + 1);
         let metrics_context = context.clone();
         tokio::spawn(async move {
             serve_prometheus(metrics_addr, prometheus_registry, metrics_context).await;
@@ -462,9 +484,9 @@ async fn serve_prometheus(
     registry: prometheus::Registry,
     context: CancellationToken,
 ) {
+    use http_body_util::Full;
     use hyper::service::service_fn;
     use hyper_util::rt::TokioIo;
-    use http_body_util::Full;
 
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,

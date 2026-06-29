@@ -66,6 +66,10 @@ impl AlignedBuffer {
         self.len
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     fn grow(&mut self, min_capacity: usize) {
         let new_capacity = align_up(min_capacity.max(self.capacity * 2), PAGE_SIZE);
         let new_ptr = unsafe {
