@@ -5,8 +5,10 @@ use crate::segment::direct::DirectSegment;
 use crate::segment::mmap::MmapSegment;
 use crate::segment::record::{Record, RecordBatch};
 use crate::segment::standard::StandardSegment;
-use crate::wal::INVALID_OFFSET;
+use crate::storage::Storage;
+use crate::storage::wal::INVALID_OFFSET;
 use async_stream::stream;
+use async_trait::async_trait;
 use futures_util::stream::Stream;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -264,13 +266,13 @@ impl Wal {
         self.inner.commit_offset.clone()
     }
 
-    pub async fn read_stream(
+    pub fn read_stream(
         &self,
     ) -> Pin<Box<dyn Stream<Item = Result<Vec<u8>, UnitError>> + Send + '_>> {
-        self.read_stream_from(0).await
+        self.read_stream_from(0)
     }
 
-    pub async fn read_stream_from(
+    pub fn read_stream_from(
         &self,
         from_segment_id: u64,
     ) -> Pin<Box<dyn Stream<Item = Result<Vec<u8>, UnitError>> + Send + '_>> {
@@ -365,6 +367,25 @@ impl Wal {
                 }
             }
         }
+    }
+}
+
+#[async_trait]
+impl Storage for Wal {
+    async fn append(&self, data: Vec<u8>) -> Result<i64, UnitError> {
+        Wal::append(self, data).await
+    }
+
+    fn watch_synced(&self) -> Receiver<i64> {
+        Wal::watch_synced(self)
+    }
+
+    fn read_stream(&self) -> Pin<Box<dyn Stream<Item = Result<Vec<u8>, UnitError>> + Send + '_>> {
+        Wal::read_stream(self)
+    }
+
+    async fn shutdown(&self) {
+        Wal::shutdown(self).await;
     }
 }
 
@@ -561,7 +582,7 @@ mod tests {
         let second_offset = reopened.append(second.encode_to_vec()).await.unwrap();
         wait_synced(&reopened, second_offset).await;
 
-        let mut stream = reopened.read_stream().await;
+        let mut stream = reopened.read_stream();
         let first_replayed = stream.next().await.unwrap().unwrap();
         let second_replayed = stream.next().await.unwrap().unwrap();
         assert!(stream.next().await.is_none());

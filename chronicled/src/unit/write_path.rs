@@ -1,159 +1,22 @@
+use crate::storage::Storage;
 use crate::storage::write_cache::WriteCache;
 use crate::unit::timeline_state::TimelineStateManager;
-use crate::wal::wal::Wal;
-use chronicle_proto::pb_ext::chronicle_server::Chronicle;
-use chronicle_proto::pb_ext::{
-    FenceRequest, FenceResponse, FetchEventsRequest, FetchEventsResponse, RecordEventsRequest,
-    RecordEventsResponse, StatusCode,
-};
+use chronicle_proto::pb_ext::{RecordEventsRequest, RecordEventsResponse, StatusCode};
 use futures_util::{Stream, StreamExt};
 use prost::Message;
 use std::collections::VecDeque;
-use std::future::Future;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
-use tokio::task::JoinHandle;
-use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
-use tonic::codegen::BoxStream;
-use tonic::{Request, Response, Status, Streaming};
-use tracing::warn;
-
-const RESPONSE_BUFFER: usize = 4;
+use tonic::Status;
 
 #[derive(Clone)]
-pub struct UnitServiceTasks {
-    context: CancellationToken,
-    handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
-}
-
-impl UnitServiceTasks {
-    pub fn new(context: CancellationToken) -> Self {
-        Self {
-            context,
-            handles: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
-
-    fn context(&self) -> CancellationToken {
-        self.context.clone()
-    }
-
-    fn spawn<F>(&self, future: F)
-    where
-        F: Future<Output = ()> + Send + 'static,
-    {
-        let handle = tokio::spawn(future);
-        self.handles.lock().unwrap().push(handle);
-    }
-
-    pub async fn shutdown(&self) {
-        self.context.cancel();
-        loop {
-            let handles = {
-                let mut handles = self.handles.lock().unwrap();
-                if handles.is_empty() {
-                    break;
-                }
-                std::mem::take(&mut *handles)
-            };
-            for handle in handles {
-                if let Err(err) = handle.await {
-                    warn!(error = ?err, "unit service stream task join error");
-                }
-            }
-        }
-    }
-}
-
-pub struct UnitService {
-    wal: Wal,
-    write_cache: WriteCache,
-    timeline_state: Arc<TimelineStateManager>,
-    tasks: UnitServiceTasks,
-    inflight_capacity: usize,
-}
-
-pub struct UnitServiceConfig {
-    pub wal: Wal,
-    pub write_cache: WriteCache,
-    pub timeline_state: Arc<TimelineStateManager>,
-    pub tasks: UnitServiceTasks,
-    pub inflight_capacity: usize,
-}
-
-impl UnitService {
-    pub fn new(config: UnitServiceConfig) -> Self {
-        Self {
-            wal: config.wal,
-            write_cache: config.write_cache,
-            timeline_state: config.timeline_state,
-            tasks: config.tasks,
-            inflight_capacity: config.inflight_capacity,
-        }
-    }
-}
-
-#[tonic::async_trait]
-impl Chronicle for UnitService {
-    type RecordStream = BoxStream<RecordEventsResponse>;
-
-    async fn record(
-        &self,
-        request: Request<Streaming<RecordEventsRequest>>,
-    ) -> Result<Response<Self::RecordStream>, Status> {
-        let (tx, rx) = mpsc::channel(RESPONSE_BUFFER);
-        let context = self.tasks.context();
-        let stream_context = RecordStreamContext {
-            wal: self.wal.clone(),
-            write_cache: self.write_cache.clone(),
-            timeline_state: self.timeline_state.clone(),
-            context,
-            inflight_capacity: self.inflight_capacity,
-        };
-        self.tasks
-            .spawn(run_record_stream(request.into_inner(), tx, stream_context));
-
-        let output_stream = ReceiverStream::new(rx);
-        Ok(Response::new(Box::pin(output_stream) as Self::RecordStream))
-    }
-
-    type FetchStream = BoxStream<FetchEventsResponse>;
-
-    async fn fetch(
-        &self,
-        _request: Request<Streaming<FetchEventsRequest>>,
-    ) -> Result<Response<Self::FetchStream>, Status> {
-        Err(Status::unimplemented("unit read path is disabled"))
-    }
-
-    async fn fence(
-        &self,
-        request: Request<FenceRequest>,
-    ) -> Result<Response<FenceResponse>, Status> {
-        let req = request.into_inner();
-        match self.timeline_state.fence(req.timeline_id, req.term) {
-            Ok(lra) => Ok(Response::new(FenceResponse {
-                code: StatusCode::Ok.into(),
-                lra,
-                term: req.term,
-            })),
-            Err(current_term) => Ok(Response::new(FenceResponse {
-                code: StatusCode::Fenced.into(),
-                lra: -1,
-                term: current_term,
-            })),
-        }
-    }
-}
-
-#[derive(Clone)]
-struct RecordStreamContext {
-    wal: Wal,
-    write_cache: WriteCache,
-    timeline_state: Arc<TimelineStateManager>,
-    context: CancellationToken,
-    inflight_capacity: usize,
+pub(crate) struct RecordStreamContext {
+    pub(crate) storage: Arc<dyn Storage>,
+    pub(crate) write_cache: WriteCache,
+    pub(crate) timeline_state: Arc<TimelineStateManager>,
+    pub(crate) context: CancellationToken,
+    pub(crate) inflight_capacity: usize,
 }
 
 struct InflightWrite {
@@ -237,7 +100,7 @@ impl BatchAck {
     }
 }
 
-async fn run_record_stream<S>(
+pub(crate) async fn run_record_stream<S>(
     stream: S,
     response_tx: mpsc::Sender<Result<RecordEventsResponse, Status>>,
     context: RecordStreamContext,
@@ -249,7 +112,7 @@ async fn run_record_stream<S>(
         receive_record_requests(stream, response_tx.clone(), inflight_tx, context.clone());
     let sync_loop = sync_record_inflight(
         inflight_rx,
-        context.wal,
+        context.storage,
         context.write_cache,
         context.timeline_state,
         context.context,
@@ -380,7 +243,7 @@ async fn enqueue_record_batch(
                 ack.fail_status(Status::cancelled("record stream cancelled")).await;
                 return;
             }
-            result = context.wal.append(encoded) => match result {
+            result = context.storage.append(encoded) => match result {
                 Ok(offset) => offset,
                 Err(error) => {
                     ack.fail_status(Status::internal(error.to_string())).await;
@@ -400,13 +263,13 @@ async fn enqueue_record_batch(
 
 async fn sync_record_inflight(
     mut inflight_rx: mpsc::Receiver<InflightWrite>,
-    wal: Wal,
+    storage: Arc<dyn Storage>,
     write_cache: WriteCache,
     timeline_state: Arc<TimelineStateManager>,
     context: CancellationToken,
 ) {
-    let mut synced_offset = *wal.watch_synced().borrow();
-    let mut watch = wal.watch_synced();
+    let mut synced_offset = *storage.watch_synced().borrow();
+    let mut watch = storage.watch_synced();
     let mut pending = VecDeque::new();
     let mut inflight_closed = false;
 
@@ -501,6 +364,7 @@ async fn fail_pending_writes(pending: &mut VecDeque<InflightWrite>, status: Stat
 mod tests {
     use super::*;
     use crate::option::unit_options::IoMode;
+    use crate::storage::wal::{Wal, WalOptions};
     use chronicle_proto::pb_ext::{Event, RecordEventsRequestItem};
     use futures_util::StreamExt;
 
@@ -516,14 +380,16 @@ mod tests {
         }
     }
 
-    async fn test_wal(dir: &std::path::Path) -> Wal {
-        Wal::new(crate::wal::wal::WalOptions {
-            dir: dir.to_string_lossy().to_string(),
-            max_segment_size: None,
-            io_mode: IoMode::Basic,
-        })
-        .await
-        .unwrap()
+    async fn test_wal(dir: &std::path::Path) -> Arc<Wal> {
+        Arc::new(
+            Wal::new(WalOptions {
+                dir: dir.to_string_lossy().to_string(),
+                max_segment_size: None,
+                io_mode: IoMode::Basic,
+            })
+            .await
+            .unwrap(),
+        )
     }
 
     #[tokio::test]
@@ -536,7 +402,7 @@ mod tests {
         let context = CancellationToken::new();
         let (response_tx, mut response_rx) = mpsc::channel(4);
         let stream_context = RecordStreamContext {
-            wal: wal.clone(),
+            storage: wal.clone(),
             write_cache: write_cache.clone(),
             timeline_state: timeline_state.clone(),
             context,
@@ -567,7 +433,7 @@ mod tests {
         assert_eq!(cached, vec![event.clone()]);
         assert_eq!(timeline_state.get_state(1).unwrap().lra, 7);
 
-        let mut replay = wal.read_stream().await;
+        let mut replay = wal.read_stream();
         let replayed = replay.next().await.unwrap().unwrap();
         assert_eq!(Event::decode(replayed.as_slice()).unwrap(), event);
         assert!(replay.next().await.is_none());
@@ -585,7 +451,7 @@ mod tests {
         let context = CancellationToken::new();
         let (response_tx, mut response_rx) = mpsc::channel(4);
         let stream_context = RecordStreamContext {
-            wal: wal.clone(),
+            storage: wal.clone(),
             write_cache: write_cache.clone(),
             timeline_state: timeline_state.clone(),
             context,
@@ -612,7 +478,7 @@ mod tests {
         assert_eq!(response.commit_offset, -1);
         assert!(write_cache.scan(1, 0, 10).is_empty());
 
-        let mut replay = wal.read_stream().await;
+        let mut replay = wal.read_stream();
         assert!(replay.next().await.is_none());
 
         wal.shutdown().await;
