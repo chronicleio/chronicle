@@ -1,4 +1,4 @@
-use chronicle_catalog::error::CatalogError;
+use catalog::error::CatalogError;
 use libxunit::error::XunitClientError;
 use thiserror::Error;
 

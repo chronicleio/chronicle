@@ -1,7 +1,7 @@
 pub mod error;
 
 use async_trait::async_trait;
-use chronicle_catalog::{
+use catalog::{
     Action, ActionRequest, DatasetName, Offset, OffsetRange, PartitionId, SchemaId, SnapshotId,
     Versioned,
 };
@@ -32,6 +32,24 @@ pub struct AppendRowsRequest {
     pub rows: Vec<RowData>,
 }
 
+impl AppendRowsRequest {
+    pub fn new(
+        dataset: impl Into<DatasetName>,
+        partition: impl Into<PartitionId>,
+        schema_id: SchemaId,
+        offset_range: OffsetRange,
+        rows: Vec<RowData>,
+    ) -> Self {
+        Self {
+            dataset: dataset.into(),
+            partition: partition.into(),
+            schema_id,
+            offset_range,
+            rows,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppendRowsResponse {
     pub committed_offset: Offset,
@@ -44,6 +62,23 @@ pub struct ScanRequest {
     pub filters: Vec<ScanFilter>,
     pub limit: Option<usize>,
     pub snapshot: Option<SnapshotId>,
+}
+
+impl ScanRequest {
+    pub fn all(dataset: impl Into<DatasetName>) -> Self {
+        Self {
+            dataset: dataset.into(),
+            projection: Vec::new(),
+            filters: Vec::new(),
+            limit: None,
+            snapshot: None,
+        }
+    }
+
+    pub fn with_limit(mut self, limit: usize) -> Self {
+        self.limit = Some(limit);
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,6 +96,15 @@ pub struct RowBatch {
 pub struct RowData {
     pub offset: Offset,
     pub payload: Vec<u8>,
+}
+
+impl RowData {
+    pub fn new(offset: Offset, payload: impl Into<Vec<u8>>) -> Self {
+        Self {
+            offset,
+            payload: payload.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

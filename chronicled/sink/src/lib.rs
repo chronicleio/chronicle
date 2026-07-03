@@ -1,6 +1,6 @@
 pub mod error;
 
-use chronicle_catalog::CatalogRef;
+use catalog::CatalogRef;
 use error::SinkError;
 use tracing::info;
 

@@ -52,7 +52,7 @@ spec:
       volumes:
         - name: config
           configMap:
-            name: chronicle-unit-config
+            name: chronicle-config
   volumeClaimTemplates:
     - metadata:
         name: data

@@ -10,8 +10,12 @@ path = "src/main.rs"
 
 [dependencies]
 libchronicle = { path = "../libchronicle" }
+libxunit = { path = "../libxunit" }
 chronicle-unit = { path = "../../chronicled/unit" }
-chronicle-catalog = { path = "../../chronicle-catalog" }
+chronicle-sink = { path = "../../chronicled/sink" }
+chronicle-xunit = { path = "../../chronicled/xunit" }
+chronicle-lens = { path = "../../chronicled/lens" }
+catalog = { path = "../../catalog" }
 tonic = { workspace = true }
 clap = { workspace = true }
 futures-util = { workspace = true }

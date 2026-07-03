@@ -1,5 +1,6 @@
 pub mod dataset;
 pub mod error;
+pub mod memory_catalog;
 pub mod oxia_catalog;
 pub mod types;
 
@@ -13,6 +14,7 @@ use tokio::sync::mpsc::Receiver;
 use tracing::info;
 
 pub use dataset::*;
+pub use memory_catalog::{MemoryCatalog, build_memory_catalog};
 pub use types::*;
 
 /// Wraps a value with its catalog version for CAS operations.

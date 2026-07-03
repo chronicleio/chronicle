@@ -1,4 +1,5 @@
 use chronicle_cli::module::{ModuleAction, ModuleKind};
+use chronicle_cli::sql::SqlArgs;
 use chronicle_cli::unit::UnitAction;
 use chronicle_cli::verify::VerifyArgs;
 use clap::Parser;
@@ -32,6 +33,7 @@ enum Commands {
         #[command(subcommand)]
         action: ModuleAction,
     },
+    Sql(SqlArgs),
     Verify(VerifyArgs),
 }
 
@@ -47,6 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Sink { action } => chronicle_cli::module::run(ModuleKind::Sink, action).await?,
         Commands::Xunit { action } => chronicle_cli::module::run(ModuleKind::Xunit, action).await?,
         Commands::Lens { action } => chronicle_cli::module::run(ModuleKind::Lens, action).await?,
+        Commands::Sql(args) => chronicle_cli::sql::run(args).await?,
         Commands::Verify(args) => {
             tracing_subscriber::fmt()
                 .with_env_filter(

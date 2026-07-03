@@ -1,5 +1,1 @@
-
-
-struct Cache {
-    
-}
+struct Cache {}

@@ -1,4 +1,12 @@
+use crate::banner;
 use crate::process;
+use catalog::{CatalogOptions, build_catalog};
+use chronicle_sink::{Sink, SinkOptions};
+use chronicle_xunit::Xunit;
+use serde::Deserialize;
+use std::io::IsTerminal;
+use tracing::info;
+use tracing_subscriber::EnvFilter;
 
 #[derive(Clone, Copy)]
 pub enum ModuleKind {
@@ -50,17 +58,36 @@ pub enum ModuleAction {
 
 pub async fn run(kind: ModuleKind, action: ModuleAction) -> Result<(), Box<dyn std::error::Error>> {
     match action {
-        ModuleAction::Start { config, .. } => {
-            let config_note = config
-                .as_deref()
-                .map(|path| format!(" with config '{}'", path))
-                .unwrap_or_default();
-            Err(format!(
-                "{} module start{} is not implemented yet",
-                kind.display_name(),
-                config_note
-            )
-            .into())
+        ModuleAction::Start { config, pid_file } => {
+            let config = load_config(config.as_deref())?;
+            init_tracing(&config.log.level);
+            banner::print_banner(kind.display_name());
+
+            let pid_file = pid_file.unwrap_or_else(|| kind.default_pid_file());
+            process::write_pid_file(&pid_file)?;
+
+            let catalog = build_catalog(&config.catalog).await?;
+            match kind {
+                ModuleKind::Catalog => {
+                    info!("catalog component connected to Oxia");
+                }
+                ModuleKind::Sink => {
+                    Sink::new(catalog, SinkOptions::default()).start().await?;
+                }
+                ModuleKind::Xunit => {
+                    let _xunit = Xunit::new(catalog);
+                    info!("xunit component started");
+                }
+                ModuleKind::Lens => {
+                    let _lens = chronicle_lens::Lens::new(catalog);
+                    info!("lens component started");
+                }
+            }
+
+            process::wait_for_shutdown().await;
+            info!(component = kind.command_name(), "received shutdown signal");
+            process::remove_pid_file(&pid_file);
+            Ok(())
         }
         ModuleAction::Stop { pid_file } => {
             let pid_file = pid_file.unwrap_or_else(|| kind.default_pid_file());
@@ -74,4 +101,59 @@ pub async fn run(kind: ModuleKind, action: ModuleAction) -> Result<(), Box<dyn s
             Ok(())
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct ModuleConfig {
+    #[serde(default)]
+    catalog: CatalogOptions,
+    #[serde(default)]
+    log: LogConfig,
+}
+
+#[derive(Debug, Deserialize)]
+struct LogConfig {
+    #[serde(default = "default_log_level")]
+    level: String,
+}
+
+impl Default for LogConfig {
+    fn default() -> Self {
+        Self {
+            level: default_log_level(),
+        }
+    }
+}
+
+fn default_log_level() -> String {
+    "info".to_string()
+}
+
+fn load_config(path: Option<&str>) -> Result<ModuleConfig, Box<dyn std::error::Error>> {
+    match path {
+        Some(path) => {
+            let contents = std::fs::read_to_string(path)
+                .map_err(|error| format!("failed to read config file '{}': {}", path, error))?;
+            toml::from_str(&contents).map_err(|error| {
+                format!("failed to parse config file '{}': {}", path, error).into()
+            })
+        }
+        None => Ok(ModuleConfig {
+            catalog: CatalogOptions::default(),
+            log: LogConfig::default(),
+        }),
+    }
+}
+
+fn init_tracing(level: &str) {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level)),
+        )
+        .with_ansi(std::io::stderr().is_terminal())
+        .with_target(false)
+        .with_thread_ids(false)
+        .with_thread_names(false)
+        .compact()
+        .try_init();
 }

@@ -2,7 +2,7 @@ use crate::Event;
 use crate::conn::Conn;
 use crate::conn::conn_pool::ConnPool;
 use crate::error::ChronicleError;
-use chronicle_catalog::{Catalog, CatalogRef};
+use catalog::{Catalog, CatalogRef};
 use chronicle_proto::pb_catalog::Segment;
 use chronicle_proto::pb_ext::{ChunkType, FetchEventsRequest};
 use futures_util::{Stream, StreamExt};

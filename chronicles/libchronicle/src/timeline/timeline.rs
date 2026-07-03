@@ -3,7 +3,7 @@ use super::state_machine::StateMachine;
 use crate::conn::conn_pool::ConnPool;
 use crate::error::ChronicleError;
 use crate::{Event as UserEvent, FetchOptions, Offset, StartPosition, TimelineOptions};
-use chronicle_catalog::CatalogRef;
+use catalog::CatalogRef;
 use std::sync::Arc;
 use tracing::info;
 

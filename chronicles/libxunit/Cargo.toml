@@ -5,7 +5,7 @@ edition = "2024"
 resolver = "3"
 
 [dependencies]
-chronicle-catalog = { path = "../../chronicle-catalog" }
+catalog = { path = "../../catalog" }
 async-trait = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }

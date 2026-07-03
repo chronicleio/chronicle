@@ -17,16 +17,13 @@ unit:
       memory: "1Gi"
       cpu: "1"
 
-saga:
+xunit:
   enabled: true
   replicaCount: 1
   image:
     repository: chronicle-unit
     tag: dev
     pullPolicy: IfNotPresent
-  httpPort: 3000
-  storage:
-    size: 2Gi
   resources:
     requests:
       memory: "256Mi"
@@ -35,15 +32,28 @@ saga:
       memory: "1Gi"
       cpu: "1"
 
-lexicon:
+sink:
   enabled: true
   replicaCount: 1
   image:
     repository: chronicle-unit
     tag: dev
     pullPolicy: IfNotPresent
-  grpcPort: 50060
-  httpPort: 8080
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+
+lens:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: chronicle-unit
+    tag: dev
+    pullPolicy: IfNotPresent
   resources:
     requests:
       memory: "128Mi"

@@ -194,13 +194,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d71b6127be86fdcfddb610f7182ac57211d4b18a3e9c82eb2d17662f2227ad6a"
 
 [[package]]
-name = "cfg-if"
-version = "1.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
-
-[[package]]
-name = "chronicle-catalog"
+name = "catalog"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -208,6 +202,7 @@ dependencies = [
  "liboxia",
  "prost 0.13.5",
  "serde",
+ "serde_json",
  "thiserror",
  "tokio",
  "tonic",
@@ -215,15 +210,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "cfg-if"
+version = "1.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
+
+[[package]]
 name = "chronicle-cli"
 version = "0.1.0"
 dependencies = [
- "chronicle-catalog",
+ "catalog",
+ "chronicle-lens",
+ "chronicle-sink",
  "chronicle-unit",
+ "chronicle-xunit",
  "clap",
  "futures-util",
  "libc",
  "libchronicle",
+ "libxunit",
  "serde",
  "tokio",
  "toml",
@@ -236,9 +241,11 @@ dependencies = [
 name = "chronicle-lens"
 version = "0.1.0"
 dependencies = [
- "chronicle-catalog",
+ "catalog",
+ "chronicle-xunit",
  "libxunit",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -256,7 +263,7 @@ dependencies = [
 name = "chronicle-sink"
 version = "0.1.0"
 dependencies = [
- "chronicle-catalog",
+ "catalog",
  "libchronicle",
  "libxunit",
  "thiserror",
@@ -296,9 +303,10 @@ name = "chronicle-xunit"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "chronicle-catalog",
+ "catalog",
  "libxunit",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -754,10 +762,12 @@ dependencies = [
  "async-trait",
  "backoff",
  "base64",
- "chronicle-catalog",
+ "catalog",
  "chronicle-proto",
+ "chronicle-xunit",
  "dashmap",
  "futures-util",
+ "libxunit",
  "log",
  "opentelemetry",
  "opentelemetry_sdk",
@@ -797,7 +807,7 @@ name = "libxunit"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "chronicle-catalog",
+ "catalog",
  "serde",
  "thiserror",
 ]

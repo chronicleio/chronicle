@@ -1,9 +1,9 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: chronicle-unit-config
+  name: chronicle-config
   labels:
-    app.kubernetes.io/name: chronicle-unit
+    app.kubernetes.io/name: chronicle
     app.kubernetes.io/instance: {{ .Release.Name }}
 data:
   chronicled.toml: |

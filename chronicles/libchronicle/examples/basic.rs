@@ -3,8 +3,7 @@ use libchronicle::{Event, TimelineOptions};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let catalog =
-        chronicle_catalog::build_catalog(&chronicle_catalog::CatalogOptions::default()).await?;
+    let catalog = catalog::build_catalog(&catalog::CatalogOptions::default()).await?;
 
     let chronicle = Chronicle::new(catalog, ChronicleOptions::new());
 

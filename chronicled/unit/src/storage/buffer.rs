@@ -1,5 +1,1 @@
-
-
-struct WriteBuffer {
-    
-}
+struct WriteBuffer {}

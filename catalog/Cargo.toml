@@ -1,5 +1,5 @@
 [package]
-name = "chronicle-catalog"
+name = "catalog"
 version = "0.1.0"
 edition = "2024"
 resolver = "3"
@@ -14,3 +14,4 @@ tracing = { workspace = true }
 liboxia = { workspace = true }
 prost = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }

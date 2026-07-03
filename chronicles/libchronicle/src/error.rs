@@ -1,5 +1,6 @@
 use crate::error_inner::InnerError;
-use chronicle_catalog::error::CatalogError;
+use catalog::error::CatalogError;
+use libxunit::error::XunitClientError;
 use thiserror::Error;
 
 #[derive(Error, Debug, Clone)]
@@ -24,6 +25,9 @@ pub enum ChronicleError {
 
     #[error("Catalog error: {0}")]
     Catalog(#[from] CatalogError),
+
+    #[error("XUnit error: {0}")]
+    Xunit(#[from] XunitClientError),
 
     #[error("Transport error: {0}")]
     Transport(String),

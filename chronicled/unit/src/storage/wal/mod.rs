@@ -1,6 +1,8 @@
+use crate::option::IoMode;
 
-
-
-trait WriteAheadLog {
-    
+#[derive(Debug, Clone)]
+pub struct WalOptions {
+    pub dir: String,
+    pub max_segment_size: Option<u64>,
+    pub io_mode: IoMode,
 }

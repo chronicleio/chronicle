@@ -1,4 +1,4 @@
-use chronicle_catalog::error::CatalogError;
+use catalog::error::CatalogError;
 use thiserror::Error;
 
 #[derive(Error, Debug)]

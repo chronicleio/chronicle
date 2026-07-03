@@ -1,23 +1,34 @@
 use async_trait::async_trait;
 use chronicle_proto::pb_catalog::{Segment, TimelineMeta, UnitInfo, UnitRegistration, UnitStatus};
-use liboxia::client::{GetOption, GetSequenceUpdatesOption, OxiaClient, PutOption};
+use liboxia::client::{
+    DeleteOption, GetOption, GetSequenceUpdatesOption, OxiaClient, PutOption, RangeScanOption,
+};
 use liboxia::client_builder::OxiaClientBuilder;
 use liboxia::errors::OxiaError;
 use prost::Message;
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc::Receiver;
 use tracing::{debug, info};
 
 use crate::error::CatalogError;
-use crate::{Catalog, Versioned};
+use crate::{
+    Action, ActionId, ActionRequest, ActionStatus, Catalog, Dataset, DatasetName, Versioned,
+};
 
 const KEY_PREFIX: &str = "/chronicle/timelines/";
 const UNITS_PREFIX: &str = "/chronicle/units/";
 const UNITS_MAX: &str = "/chronicle/units0"; // '0' > '/' in ASCII
+const DATASETS_PREFIX: &str = "/chronicle/datasets/";
+const DATASET_PARTITION_KEY: &str = "/chronicle/datasets";
+const DATASET_INDEX_KEY: &str = "/chronicle/dataset_index";
+const ACTIONS_PREFIX: &str = "/chronicle/actions/";
+const ACTION_PARTITION_KEY: &str = "/chronicle/actions";
 
 pub struct OxiaCatalog {
     client: OxiaClient,
     next_timeline_id: AtomicI64,
+    next_action_id: AtomicI64,
 }
 
 impl OxiaCatalog {
@@ -35,6 +46,7 @@ impl OxiaCatalog {
         let catalog = Self {
             client,
             next_timeline_id: AtomicI64::new(1),
+            next_action_id: AtomicI64::new(1),
         };
         if let Ok(timelines) = catalog.list_timelines().await {
             let max_id = timelines.iter().map(|t| t.timeline_id).max().unwrap_or(0);
@@ -45,6 +57,106 @@ impl OxiaCatalog {
 
     fn meta_key(name: &str) -> String {
         format!("{}{}", KEY_PREFIX, name)
+    }
+
+    fn dataset_key(name: &str) -> String {
+        format!("{}{}", DATASETS_PREFIX, name)
+    }
+
+    fn action_key(id: &str) -> String {
+        format!("{}{}", ACTIONS_PREFIX, id)
+    }
+
+    fn dataset_put_options(expected_version: Option<i64>) -> Vec<PutOption> {
+        let mut options = vec![PutOption::PartitionKey(DATASET_PARTITION_KEY.to_string())];
+        if let Some(expected_version) = expected_version {
+            options.push(PutOption::ExpectVersionId(expected_version));
+        }
+        options
+    }
+
+    fn dataset_get_options() -> Vec<GetOption> {
+        vec![
+            GetOption::PartitionKey(DATASET_PARTITION_KEY.to_string()),
+            GetOption::IncludeValue(),
+        ]
+    }
+
+    fn dataset_delete_options(expected_version: i64) -> Vec<DeleteOption> {
+        vec![
+            DeleteOption::PartitionKey(DATASET_PARTITION_KEY.to_string()),
+            DeleteOption::ExpectVersionId(expected_version),
+        ]
+    }
+
+    fn action_put_options(expected_version: Option<i64>) -> Vec<PutOption> {
+        let mut options = vec![PutOption::PartitionKey(ACTION_PARTITION_KEY.to_string())];
+        if let Some(expected_version) = expected_version {
+            options.push(PutOption::ExpectVersionId(expected_version));
+        }
+        options
+    }
+
+    fn action_get_options() -> Vec<GetOption> {
+        vec![
+            GetOption::PartitionKey(ACTION_PARTITION_KEY.to_string()),
+            GetOption::IncludeValue(),
+        ]
+    }
+
+    fn action_scan_options() -> Vec<RangeScanOption> {
+        vec![RangeScanOption::PartitionKey(
+            ACTION_PARTITION_KEY.to_string(),
+        )]
+    }
+
+    fn now_ms() -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as i64)
+            .unwrap_or_default()
+    }
+
+    fn encode_dataset(dataset: &Dataset) -> Result<Vec<u8>, CatalogError> {
+        serde_json::to_vec(dataset)
+            .map_err(|error| CatalogError::Internal(format!("failed to encode dataset: {error}")))
+    }
+
+    fn encode_dataset_index(datasets: &[DatasetName]) -> Result<Vec<u8>, CatalogError> {
+        serde_json::to_vec(datasets).map_err(|error| {
+            CatalogError::Internal(format!("failed to encode dataset index: {error}"))
+        })
+    }
+
+    fn decode_dataset(value: &[u8], version_id: i64) -> Result<Dataset, CatalogError> {
+        let mut dataset: Dataset = serde_json::from_slice(value).map_err(|error| {
+            CatalogError::Internal(format!("failed to decode dataset: {error}"))
+        })?;
+        dataset.version = version_id;
+        Ok(dataset)
+    }
+
+    fn decode_dataset_index(value: &[u8]) -> Result<Vec<DatasetName>, CatalogError> {
+        serde_json::from_slice(value).map_err(|error| {
+            CatalogError::Internal(format!("failed to decode dataset index: {error}"))
+        })
+    }
+
+    fn encode_action(action: &Action) -> Result<Vec<u8>, CatalogError> {
+        serde_json::to_vec(action)
+            .map_err(|error| CatalogError::Internal(format!("failed to encode action: {error}")))
+    }
+
+    fn decode_action(value: &[u8], version_id: i64) -> Result<Action, CatalogError> {
+        let mut action: Action = serde_json::from_slice(value)
+            .map_err(|error| CatalogError::Internal(format!("failed to decode action: {error}")))?;
+        action.version = version_id;
+        Ok(action)
+    }
+
+    fn next_action_id(&self) -> ActionId {
+        let sequence = self.next_action_id.fetch_add(1, Ordering::SeqCst);
+        format!("action-{}-{}", Self::now_ms(), sequence)
     }
 
     fn decode_meta(value: &[u8], version_id: i64) -> Result<TimelineMeta, CatalogError> {
@@ -83,6 +195,259 @@ impl OxiaCatalog {
 }
 
 impl OxiaCatalog {
+    pub async fn create_dataset(
+        &self,
+        mut dataset: Dataset,
+    ) -> Result<Versioned<Dataset>, CatalogError> {
+        let now = Self::now_ms();
+        dataset.version = 0;
+        dataset.created_at_ms = now;
+        dataset.updated_at_ms = now;
+        let key = Self::dataset_key(&dataset.name);
+        let value = Self::encode_dataset(&dataset)?;
+
+        let result = self
+            .client
+            .put_with_options(key, value, Self::dataset_put_options(Some(-1)))
+            .await
+            .map_err(|error| match error {
+                OxiaError::UnexpectedVersionId() => {
+                    CatalogError::AlreadyExists(dataset.name.clone())
+                }
+                other => CatalogError::from(other),
+            })?;
+
+        dataset.version = result.version.version_id;
+        self.add_dataset_to_index(&dataset.name).await?;
+        Ok(Versioned::new(dataset, result.version.version_id))
+    }
+
+    pub async fn update_dataset(
+        &self,
+        mut dataset: Dataset,
+        expected_version: i64,
+    ) -> Result<Versioned<Dataset>, CatalogError> {
+        dataset.updated_at_ms = Self::now_ms();
+        let key = Self::dataset_key(&dataset.name);
+        let value = Self::encode_dataset(&dataset)?;
+
+        let result = self
+            .client
+            .put_with_options(
+                key,
+                value,
+                Self::dataset_put_options(Some(expected_version)),
+            )
+            .await
+            .map_err(|error| match error {
+                OxiaError::UnexpectedVersionId() => CatalogError::VersionConflict {
+                    expected: expected_version,
+                    actual: -1,
+                },
+                OxiaError::KeyNotFound() => CatalogError::NotFound(dataset.name.clone()),
+                other => CatalogError::from(other),
+            })?;
+
+        dataset.version = result.version.version_id;
+        Ok(Versioned::new(dataset, result.version.version_id))
+    }
+
+    pub async fn get_dataset(&self, name: &str) -> Result<Versioned<Dataset>, CatalogError> {
+        let result = self
+            .client
+            .get_with_options(Self::dataset_key(name), Self::dataset_get_options())
+            .await
+            .map_err(|error| match error {
+                OxiaError::KeyNotFound() => CatalogError::NotFound(name.to_string()),
+                other => CatalogError::from(other),
+            })?;
+
+        let value = result
+            .value
+            .ok_or_else(|| CatalogError::NotFound(name.to_string()))?;
+        let dataset = Self::decode_dataset(&value, result.version.version_id)?;
+        Ok(Versioned::new(dataset, result.version.version_id))
+    }
+
+    pub async fn list_datasets(&self) -> Result<Vec<Versioned<Dataset>>, CatalogError> {
+        let (names, _) = self.get_dataset_index().await?;
+        let mut datasets = Vec::with_capacity(names.len());
+        for name in names {
+            match self.get_dataset(&name).await {
+                Ok(dataset) => datasets.push(dataset),
+                Err(CatalogError::NotFound(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(datasets)
+    }
+
+    pub async fn delete_dataset(
+        &self,
+        name: &str,
+        expected_version: i64,
+    ) -> Result<(), CatalogError> {
+        self.client
+            .delete_with_options(
+                Self::dataset_key(name),
+                Self::dataset_delete_options(expected_version),
+            )
+            .await
+            .map_err(|error| match error {
+                OxiaError::KeyNotFound() => CatalogError::NotFound(name.to_string()),
+                OxiaError::UnexpectedVersionId() => CatalogError::VersionConflict {
+                    expected: expected_version,
+                    actual: -1,
+                },
+                other => CatalogError::from(other),
+            })?;
+        self.remove_dataset_from_index(name).await?;
+        Ok(())
+    }
+
+    async fn get_dataset_index(&self) -> Result<(Vec<DatasetName>, i64), CatalogError> {
+        match self
+            .client
+            .get_with_options(DATASET_INDEX_KEY.to_string(), Self::dataset_get_options())
+            .await
+        {
+            Ok(result) => {
+                let value = result.value.unwrap_or_default();
+                Ok((
+                    Self::decode_dataset_index(&value)?,
+                    result.version.version_id,
+                ))
+            }
+            Err(OxiaError::KeyNotFound()) => Ok((Vec::new(), -1)),
+            Err(error) => Err(CatalogError::from(error)),
+        }
+    }
+
+    async fn put_dataset_index(
+        &self,
+        names: &[DatasetName],
+        _expected_version: i64,
+    ) -> Result<(), CatalogError> {
+        self.client
+            .put_with_options(
+                DATASET_INDEX_KEY.to_string(),
+                Self::encode_dataset_index(names)?,
+                Self::dataset_put_options(None),
+            )
+            .await
+            .map(|_| ())
+            .map_err(CatalogError::from)
+    }
+
+    async fn add_dataset_to_index(&self, name: &str) -> Result<(), CatalogError> {
+        for _ in 0..8 {
+            let (mut names, version) = self.get_dataset_index().await?;
+            if names.iter().any(|existing| existing == name) {
+                return Ok(());
+            }
+            names.push(name.to_string());
+            names.sort();
+            match self.put_dataset_index(&names, version).await {
+                Ok(()) => return Ok(()),
+                Err(CatalogError::VersionConflict { .. }) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(CatalogError::Internal(
+            "failed to update dataset index after retries".into(),
+        ))
+    }
+
+    async fn remove_dataset_from_index(&self, name: &str) -> Result<(), CatalogError> {
+        for _ in 0..8 {
+            let (mut names, version) = self.get_dataset_index().await?;
+            let before = names.len();
+            names.retain(|existing| existing != name);
+            if names.len() == before {
+                return Ok(());
+            }
+            match self.put_dataset_index(&names, version).await {
+                Ok(()) => return Ok(()),
+                Err(CatalogError::VersionConflict { .. }) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(CatalogError::Internal(
+            "failed to update dataset index after retries".into(),
+        ))
+    }
+
+    pub async fn submit_action(
+        &self,
+        request: ActionRequest,
+    ) -> Result<Versioned<Action>, CatalogError> {
+        let now = Self::now_ms();
+        let mut action = Action {
+            id: self.next_action_id(),
+            request,
+            status: ActionStatus::Pending,
+            message: None,
+            version: 0,
+            created_at_ms: now,
+            updated_at_ms: now,
+        };
+        let key = Self::action_key(&action.id);
+        let value = Self::encode_action(&action)?;
+        let result = self
+            .client
+            .put_with_options(key, value, Self::action_put_options(Some(-1)))
+            .await
+            .map_err(CatalogError::from)?;
+
+        action.version = result.version.version_id;
+        Ok(Versioned::new(action, result.version.version_id))
+    }
+
+    pub async fn get_action(&self, id: &ActionId) -> Result<Versioned<Action>, CatalogError> {
+        let result = self
+            .client
+            .get_with_options(Self::action_key(id), Self::action_get_options())
+            .await
+            .map_err(|error| match error {
+                OxiaError::KeyNotFound() => CatalogError::NotFound(id.clone()),
+                other => CatalogError::from(other),
+            })?;
+        let value = result
+            .value
+            .ok_or_else(|| CatalogError::NotFound(id.clone()))?;
+        let action = Self::decode_action(&value, result.version.version_id)?;
+        Ok(Versioned::new(action, result.version.version_id))
+    }
+
+    pub async fn list_actions(
+        &self,
+        dataset: Option<&DatasetName>,
+    ) -> Result<Vec<Versioned<Action>>, CatalogError> {
+        let result = self
+            .client
+            .range_scan_with_options(
+                ACTIONS_PREFIX.to_string(),
+                format!("{}\x7f", ACTIONS_PREFIX),
+                Self::action_scan_options(),
+            )
+            .await
+            .map_err(CatalogError::from)?;
+
+        let mut actions = Vec::with_capacity(result.records.len());
+        for record in &result.records {
+            if let Some(ref value) = record.value {
+                let action = Self::decode_action(value, record.version.version_id)?;
+                if dataset
+                    .map(|dataset| action.request.dataset == *dataset)
+                    .unwrap_or(true)
+                {
+                    actions.push(Versioned::new(action, record.version.version_id));
+                }
+            }
+        }
+        Ok(actions)
+    }
+
     pub async fn get_timeline(&self, name: &str) -> Result<TimelineMeta, CatalogError> {
         let key = Self::meta_key(name);
         debug!("get_timeline: key={}", key);
@@ -447,6 +812,48 @@ impl OxiaCatalog {
 
 #[async_trait]
 impl Catalog for OxiaCatalog {
+    async fn create_dataset(&self, dataset: Dataset) -> Result<Versioned<Dataset>, CatalogError> {
+        OxiaCatalog::create_dataset(self, dataset).await
+    }
+
+    async fn update_dataset(
+        &self,
+        dataset: Dataset,
+        expected_version: i64,
+    ) -> Result<Versioned<Dataset>, CatalogError> {
+        OxiaCatalog::update_dataset(self, dataset, expected_version).await
+    }
+
+    async fn get_dataset(&self, name: &str) -> Result<Versioned<Dataset>, CatalogError> {
+        OxiaCatalog::get_dataset(self, name).await
+    }
+
+    async fn list_datasets(&self) -> Result<Vec<Versioned<Dataset>>, CatalogError> {
+        OxiaCatalog::list_datasets(self).await
+    }
+
+    async fn delete_dataset(&self, name: &str, expected_version: i64) -> Result<(), CatalogError> {
+        OxiaCatalog::delete_dataset(self, name, expected_version).await
+    }
+
+    async fn submit_action(
+        &self,
+        request: ActionRequest,
+    ) -> Result<Versioned<Action>, CatalogError> {
+        OxiaCatalog::submit_action(self, request).await
+    }
+
+    async fn get_action(&self, id: &ActionId) -> Result<Versioned<Action>, CatalogError> {
+        OxiaCatalog::get_action(self, id).await
+    }
+
+    async fn list_actions(
+        &self,
+        dataset: Option<&DatasetName>,
+    ) -> Result<Vec<Versioned<Action>>, CatalogError> {
+        OxiaCatalog::list_actions(self, dataset).await
+    }
+
     async fn get_timeline(&self, name: &str) -> Result<TimelineMeta, CatalogError> {
         OxiaCatalog::get_timeline(self, name).await
     }

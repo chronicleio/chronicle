@@ -9,9 +9,9 @@ WORKDIR /build
 
 COPY Cargo.toml Cargo.lock ./
 COPY proto/ proto/
+COPY catalog/ catalog/
 COPY chronicled/ chronicled/
 COPY chronicles/ chronicles/
-COPY clients/ clients/
 
 RUN cargo build --release -p chronicle-cli
 

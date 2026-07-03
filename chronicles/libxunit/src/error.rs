@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Clone)]
 pub enum XunitClientError {
     #[error("Invalid request: {0}")]
     InvalidRequest(String),
