@@ -22,7 +22,7 @@ COPY chronicled.toml /etc/chronicle/chronicled.toml
 
 RUN mkdir -p /data/wal /data/storage /data/segments /data/lexicon
 
-EXPOSE 7070 7071 50060 8080
+EXPOSE 7070 7071 50051 8080
 
 ENTRYPOINT ["chronicle"]
 CMD ["unit", "start", "--config", "/etc/chronicle/chronicled.toml"]
