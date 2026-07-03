@@ -4,6 +4,11 @@ use catalog::{
     Action, ActionKind, ActionRequest, CatalogRef, DataType, Dataset, DatasetField, DatasetSchema,
     Versioned,
 };
+use datafusion_sql::parser::{DFParser, Statement as DataFusionStatement};
+use datafusion_sql::sqlparser::ast::{
+    Expr, GroupByExpr, LimitClause, Query, Select, SelectItem, SetExpr, Statement as SqlStatement,
+    TableFactor,
+};
 use error::LensError;
 use libxunit::{RowBatch, ScanRequest, XunitClient};
 use std::sync::Arc;
@@ -74,29 +79,150 @@ pub enum LensOutput {
 }
 
 fn parse_select(statement: &str) -> Result<Option<ScanRequest>, LensError> {
-    let tokens: Vec<&str> = statement.split_whitespace().collect();
-    if tokens.is_empty() || !tokens[0].eq_ignore_ascii_case("select") {
+    if !first_keyword_is(statement, "select") {
         return Ok(None);
     }
 
-    if tokens.len() < 4 || tokens[1] != "*" || !tokens[2].eq_ignore_ascii_case("from") {
+    let mut statements = DFParser::parse_sql(statement)
+        .map_err(|_| LensError::InvalidStatement(SELECT_USAGE.to_string()))?;
+    if statements.len() != 1 {
         return Err(LensError::InvalidStatement(SELECT_USAGE.to_string()));
     }
 
-    let mut request = ScanRequest::all(tokens[3]);
-    if tokens.len() == 4 {
-        return Ok(Some(request));
+    let Some(DataFusionStatement::Statement(sql_statement)) = statements.pop_front() else {
+        return Err(LensError::InvalidStatement(SELECT_USAGE.to_string()));
+    };
+    let SqlStatement::Query(query) = *sql_statement else {
+        return Err(LensError::InvalidStatement(SELECT_USAGE.to_string()));
+    };
+
+    Ok(Some(scan_from_query(&query)?))
+}
+
+fn first_keyword_is(statement: &str, expected: &str) -> bool {
+    statement
+        .split_whitespace()
+        .next()
+        .map(|keyword| keyword.eq_ignore_ascii_case(expected))
+        .unwrap_or(false)
+}
+
+fn scan_from_query(query: &Query) -> Result<ScanRequest, LensError> {
+    if query.with.is_some()
+        || query.order_by.is_some()
+        || query.fetch.is_some()
+        || !query.locks.is_empty()
+        || query.for_clause.is_some()
+        || query.settings.is_some()
+        || query.format_clause.is_some()
+        || !query.pipe_operators.is_empty()
+    {
+        return Err(LensError::InvalidStatement(SELECT_USAGE.to_string()));
     }
 
-    if tokens.len() == 6 && tokens[4].eq_ignore_ascii_case("limit") {
-        let limit = tokens[5]
-            .parse::<usize>()
-            .map_err(|_| LensError::InvalidStatement(SELECT_USAGE.to_string()))?;
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return Err(LensError::InvalidStatement(SELECT_USAGE.to_string()));
+    };
+
+    let dataset = dataset_from_select(select)?;
+    let mut request = ScanRequest::all(dataset);
+    if let Some(limit) = limit_from_query(query)? {
         request = request.with_limit(limit);
-        return Ok(Some(request));
+    }
+    Ok(request)
+}
+
+fn dataset_from_select(select: &Select) -> Result<String, LensError> {
+    if select.distinct.is_some()
+        || select.select_modifiers.is_some()
+        || select.top.is_some()
+        || select.projection.len() != 1
+        || !matches!(select.projection[0], SelectItem::Wildcard(_))
+        || select.from.len() != 1
+        || !select.lateral_views.is_empty()
+        || select.prewhere.is_some()
+        || select.selection.is_some()
+        || !group_by_is_empty(&select.group_by)
+        || !select.cluster_by.is_empty()
+        || !select.distribute_by.is_empty()
+        || !select.sort_by.is_empty()
+        || select.having.is_some()
+        || !select.named_window.is_empty()
+        || select.qualify.is_some()
+        || select.value_table_mode.is_some()
+    {
+        return Err(LensError::InvalidStatement(SELECT_USAGE.to_string()));
     }
 
-    Err(LensError::InvalidStatement(SELECT_USAGE.to_string()))
+    let table = &select.from[0];
+    if !table.joins.is_empty() {
+        return Err(LensError::InvalidStatement(SELECT_USAGE.to_string()));
+    }
+
+    let TableFactor::Table {
+        name,
+        alias,
+        args,
+        with_hints,
+        version,
+        with_ordinality,
+        partitions,
+        json_path,
+        sample,
+        index_hints,
+    } = &table.relation
+    else {
+        return Err(LensError::InvalidStatement(SELECT_USAGE.to_string()));
+    };
+
+    if alias.is_some()
+        || args.is_some()
+        || !with_hints.is_empty()
+        || version.is_some()
+        || *with_ordinality
+        || !partitions.is_empty()
+        || json_path.is_some()
+        || sample.is_some()
+        || !index_hints.is_empty()
+    {
+        return Err(LensError::InvalidStatement(SELECT_USAGE.to_string()));
+    }
+
+    Ok(name.to_string())
+}
+
+fn group_by_is_empty(group_by: &GroupByExpr) -> bool {
+    match group_by {
+        GroupByExpr::Expressions(expressions, modifiers) => {
+            expressions.is_empty() && modifiers.is_empty()
+        }
+        GroupByExpr::All(_) => false,
+    }
+}
+
+fn limit_from_query(query: &Query) -> Result<Option<usize>, LensError> {
+    let Some(limit_clause) = &query.limit_clause else {
+        return Ok(None);
+    };
+
+    match limit_clause {
+        LimitClause::LimitOffset {
+            limit: Some(limit),
+            offset: None,
+            limit_by,
+        } if limit_by.is_empty() => parse_limit(limit).map(Some),
+        _ => Err(LensError::InvalidStatement(SELECT_USAGE.to_string())),
+    }
+}
+
+fn parse_limit(limit: &Expr) -> Result<usize, LensError> {
+    match limit {
+        Expr::Value(value) => value
+            .to_string()
+            .parse::<usize>()
+            .map_err(|_| LensError::InvalidStatement(SELECT_USAGE.to_string())),
+        _ => Err(LensError::InvalidStatement(SELECT_USAGE.to_string())),
+    }
 }
 
 fn parse_create_dataset(statement: &str) -> Result<Option<Dataset>, LensError> {
@@ -295,6 +421,22 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "Unsupported SQL statement: Chronicle exposes datasets; use SHOW DATASETS"
+        );
+    }
+
+    #[tokio::test]
+    async fn parsed_select_with_filter_is_rejected_until_planned() {
+        let catalog = build_memory_catalog();
+        let lens = Lens::new(catalog);
+
+        let error = lens
+            .execute("select * from events where id = 1")
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "Invalid SQL statement: expected SELECT * FROM <dataset> [LIMIT n]"
         );
     }
 }
