@@ -13,6 +13,8 @@ pub struct Lens {
     xunit: Option<Arc<dyn XunitClient>>,
 }
 
+const SELECT_USAGE: &str = "expected SELECT * FROM <dataset> [LIMIT n]";
+
 impl Lens {
     pub fn new(catalog: CatalogRef) -> Self {
         Self {
@@ -32,6 +34,13 @@ impl Lens {
         let statement = sql.trim().trim_end_matches(';').trim();
         if statement.eq_ignore_ascii_case("show datasets") {
             return Ok(LensOutput::Datasets(self.catalog.list_datasets().await?));
+        }
+        if statement.eq_ignore_ascii_case("show databases")
+            || statement.eq_ignore_ascii_case("show tables")
+        {
+            return Err(LensError::UnsupportedStatement(
+                "Chronicle exposes datasets; use SHOW DATASETS".to_string(),
+            ));
         }
 
         if let Some(dataset) = parse_create_dataset(statement)? {
@@ -71,7 +80,7 @@ fn parse_select(statement: &str) -> Result<Option<ScanRequest>, LensError> {
     }
 
     if tokens.len() < 4 || tokens[1] != "*" || !tokens[2].eq_ignore_ascii_case("from") {
-        return Err(LensError::InvalidStatement(statement.to_string()));
+        return Err(LensError::InvalidStatement(SELECT_USAGE.to_string()));
     }
 
     let mut request = ScanRequest::all(tokens[3]);
@@ -82,12 +91,12 @@ fn parse_select(statement: &str) -> Result<Option<ScanRequest>, LensError> {
     if tokens.len() == 6 && tokens[4].eq_ignore_ascii_case("limit") {
         let limit = tokens[5]
             .parse::<usize>()
-            .map_err(|_| LensError::InvalidStatement(statement.to_string()))?;
+            .map_err(|_| LensError::InvalidStatement(SELECT_USAGE.to_string()))?;
         request = request.with_limit(limit);
         return Ok(Some(request));
     }
 
-    Err(LensError::InvalidStatement(statement.to_string()))
+    Err(LensError::InvalidStatement(SELECT_USAGE.to_string()))
 }
 
 fn parse_create_dataset(statement: &str) -> Result<Option<Dataset>, LensError> {
@@ -261,5 +270,31 @@ mod tests {
             }
             other => panic!("unexpected output: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn invalid_select_reports_supported_shape() {
+        let catalog = build_memory_catalog();
+        let lens = Lens::new(catalog);
+
+        let error = lens.execute("select *;").await.unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "Invalid SQL statement: expected SELECT * FROM <dataset> [LIMIT n]"
+        );
+    }
+
+    #[tokio::test]
+    async fn show_databases_points_to_datasets() {
+        let catalog = build_memory_catalog();
+        let lens = Lens::new(catalog);
+
+        let error = lens.execute("show databases").await.unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "Unsupported SQL statement: Chronicle exposes datasets; use SHOW DATASETS"
+        );
     }
 }

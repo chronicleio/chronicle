@@ -4,7 +4,10 @@ use clap::Args;
 use libxunit::RowBatch;
 use serde::Deserialize;
 use std::io::{self, Write};
+use std::path::Path;
 use tracing_subscriber::EnvFilter;
+
+const DEFAULT_CONFIG_PATH: &str = "/etc/chronicle/chronicled.toml";
 
 #[derive(Debug, Args)]
 pub struct SqlArgs {
@@ -142,17 +145,33 @@ fn default_log_level() -> String {
 }
 
 fn load_config(path: Option<&str>) -> Result<SqlConfig, Box<dyn std::error::Error>> {
-    match path {
-        Some(path) => {
-            let contents = std::fs::read_to_string(path)
-                .map_err(|error| format!("failed to read config file '{}': {}", path, error))?;
-            toml::from_str(&contents).map_err(|error| {
-                format!("failed to parse config file '{}': {}", path, error).into()
-            })
-        }
+    match resolve_config_path(path) {
+        Some(path) => read_config(&path),
         None => Ok(SqlConfig {
             catalog: CatalogOptions::default(),
             log: LogConfig::default(),
         }),
     }
+}
+
+fn resolve_config_path(path: Option<&str>) -> Option<String> {
+    if let Some(path) = path {
+        return Some(path.to_string());
+    }
+    if let Ok(path) = std::env::var("CHRONICLE_CONFIG")
+        && !path.trim().is_empty()
+    {
+        return Some(path);
+    }
+    if Path::new(DEFAULT_CONFIG_PATH).exists() {
+        return Some(DEFAULT_CONFIG_PATH.to_string());
+    }
+    None
+}
+
+fn read_config(path: &str) -> Result<SqlConfig, Box<dyn std::error::Error>> {
+    let contents = std::fs::read_to_string(path)
+        .map_err(|error| format!("failed to read config file '{}': {}", path, error))?;
+    toml::from_str(&contents)
+        .map_err(|error| format!("failed to parse config file '{}': {}", path, error).into())
 }
