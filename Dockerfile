@@ -1,5 +1,5 @@
-# Chronicle Dockerfile
-#   docker build -t chronicle-unit:dev .
+# Lyra Dockerfile
+#   docker build -t lyra-unit:dev .
 
 FROM rust:latest
 
@@ -10,19 +10,19 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY proto/ proto/
 COPY catalog/ catalog/
-COPY chronicled/ chronicled/
-COPY chronicles/ chronicles/
+COPY lyrad/ lyrad/
+COPY lyra/ lyra/
 
-RUN cargo build --release -p chronicle-cli
+RUN cargo build --release -p lyra-cli
 
-RUN cp target/release/chronicle /usr/local/bin/chronicle && \
+RUN cp target/release/lyra /usr/local/bin/lyra && \
     rm -rf /build/target
 
-COPY chronicled.toml /etc/chronicle/chronicled.toml
+COPY lyrad.toml /etc/lyra/lyrad.toml
 
 RUN mkdir -p /data/wal /data/storage /data/segments /data/lexicon
 
 EXPOSE 7070 7071 50051 8080
 
-ENTRYPOINT ["chronicle"]
-CMD ["unit", "start", "--config", "/etc/chronicle/chronicled.toml"]
+ENTRYPOINT ["lyra"]
+CMD ["unit", "start", "--config", "/etc/lyra/lyrad.toml"]

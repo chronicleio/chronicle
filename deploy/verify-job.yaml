@@ -1,21 +1,21 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: chronicle-verify
-  namespace: chronicle
+  name: lyra-verify
+  namespace: lyra
 spec:
   backoffLimit: 0
   template:
     metadata:
       labels:
-        app: chronicle-verify
+        app: lyra-verify
     spec:
       restartPolicy: Never
       containers:
         - name: verify
-          image: chronicle-unit:dev
+          image: lyra-unit:dev
           imagePullPolicy: IfNotPresent
-          command: ["chronicle", "verify"]
+          command: ["lyra", "verify"]
           args:
             - --catalog=memory
             - --backend=memory
@@ -24,4 +24,4 @@ spec:
             - --replication-factor=3
             - --payload-size=256
             - --report-interval=5
-            - --units=http://chronicle-unit-0.chronicle-unit-headless.chronicle.svc.cluster.local:7070,http://chronicle-unit-1.chronicle-unit-headless.chronicle.svc.cluster.local:7070,http://chronicle-unit-2.chronicle-unit-headless.chronicle.svc.cluster.local:7070
+            - --units=http://lyra-unit-0.lyra-unit-headless.lyra.svc.cluster.local:7070,http://lyra-unit-1.lyra-unit-headless.lyra.svc.cluster.local:7070,http://lyra-unit-2.lyra-unit-headless.lyra.svc.cluster.local:7070

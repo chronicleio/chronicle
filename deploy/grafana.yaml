@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: grafana
-  namespace: chronicle
+  namespace: lyra
 spec:
   replicas: 1
   selector:
@@ -18,7 +18,7 @@ spec:
           image: grafana/grafana:11.5.2
           env:
             - name: GF_SECURITY_ADMIN_PASSWORD
-              value: chronicle
+              value: lyra
             - name: GF_AUTH_ANONYMOUS_ENABLED
               value: "true"
           ports:
@@ -45,7 +45,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: grafana-datasource
-  namespace: chronicle
+  namespace: lyra
 data:
   datasource.yaml: |
     apiVersion: 1
@@ -53,20 +53,20 @@ data:
       - name: Prometheus
         type: prometheus
         access: proxy
-        url: http://prometheus.chronicle.svc.cluster.local:9090
+        url: http://prometheus.lyra.svc.cluster.local:9090
         isDefault: true
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: grafana-dashboard-provider
-  namespace: chronicle
+  namespace: lyra
 data:
   dashboards.yaml: |
     apiVersion: 1
     providers:
-      - name: chronicle
-        folder: Chronicle
+      - name: lyra
+        folder: Lyra
         type: file
         options:
           path: /var/lib/grafana/dashboards
@@ -75,7 +75,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: grafana
-  namespace: chronicle
+  namespace: lyra
 spec:
   selector:
     app: grafana

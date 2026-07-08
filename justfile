@@ -1,7 +1,7 @@
 release:
     cargo build --release
     mkdir -p distribution
-    cp target/release/chronicle distribution/
+    cp target/release/lyra distribution/
 
 fetch-tla-tools:
     mkdir -p tla+/.tools
@@ -11,4 +11,4 @@ fetch-tla-tools:
 
 tla:
     cd tla+ && \
-        java -XX:+UseParallelGC -DTLA-Library=.tools/CommunityModules-deps.jar -jar .tools/tla2tools.jar -workers auto Chronicle.tla
+        java -XX:+UseParallelGC -DTLA-Library=.tools/CommunityModules-deps.jar -jar .tools/tla2tools.jar -workers auto Lyra.tla

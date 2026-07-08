@@ -1,0 +1,15 @@
+[server]
+bind_address = "127.0.0.1:7070"
+
+[wal]
+dir = "/tmp/lyra-wal"
+
+[storage]
+dir = "/tmp/lyra-storage"
+
+[log]
+level = "info"
+
+[catalog]
+service_address = "localhost:6648"
+namespace = "default"

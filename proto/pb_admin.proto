@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package io.chronicle.proto.admin.v1;
+package io.lyra.proto.admin.v1;
 
 service Admin {
   rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);

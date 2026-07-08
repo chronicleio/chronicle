@@ -1,0 +1,12 @@
+[package]
+name = "lyra-sink"
+version = "0.1.0"
+edition = "2024"
+resolver = "3"
+
+[dependencies]
+catalog = { path = "../../catalog" }
+liblyra = { path = "../../lyra/liblyra" }
+libxunit = { path = "../../lyra/libxunit" }
+thiserror = { workspace = true }
+tracing = { workspace = true }

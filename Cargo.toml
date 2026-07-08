@@ -3,17 +3,17 @@ resolver = "3"
 members = [
     "proto",
     "catalog",
-    "chronicled/unit",
-    "chronicled/sink",
-    "chronicled/xunit",
-    "chronicled/lens",
-    "chronicles/libchronicle",
-    "chronicles/libxunit",
-    "chronicles/cli",
+    "lyrad/unit",
+    "lyrad/sink",
+    "lyrad/xunit",
+    "lyrad/lens",
+    "lyra/liblyra",
+    "lyra/libxunit",
+    "lyra/cli",
 ]
 
 [workspace.dependencies]
-chronicle-proto = { path = "./proto" }
+lyra-proto = { path = "./proto" }
 
 clap = { version = "4.5.45", features = ["derive"] }
 async-trait = "^0.1"
@@ -50,7 +50,6 @@ toml = "0.9.8"
 tokio-stream = "0.1"
 serde_json = "1.0"
 liboxia = "0.0.2"
-datafusion-sql = { version = "54.0.0", default-features = false }
 axum = "0.8"
 memmap2 = "0.9"
 libc = "0.2"

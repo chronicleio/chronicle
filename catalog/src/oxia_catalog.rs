@@ -1,10 +1,10 @@
 use async_trait::async_trait;
-use chronicle_proto::pb_catalog::{Segment, TimelineMeta, UnitInfo, UnitRegistration, UnitStatus};
 use liboxia::client::{
     DeleteOption, GetOption, GetSequenceUpdatesOption, OxiaClient, PutOption, RangeScanOption,
 };
 use liboxia::client_builder::OxiaClientBuilder;
 use liboxia::errors::OxiaError;
+use lyra_proto::pb_catalog::{Segment, TimelineMeta, UnitInfo, UnitRegistration, UnitStatus};
 use prost::Message;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -16,14 +16,14 @@ use crate::{
     Action, ActionId, ActionRequest, ActionStatus, Catalog, Dataset, DatasetName, Versioned,
 };
 
-const KEY_PREFIX: &str = "/chronicle/timelines/";
-const UNITS_PREFIX: &str = "/chronicle/units/";
-const UNITS_MAX: &str = "/chronicle/units0"; // '0' > '/' in ASCII
-const DATASETS_PREFIX: &str = "/chronicle/datasets/";
-const DATASET_PARTITION_KEY: &str = "/chronicle/datasets";
-const DATASET_INDEX_KEY: &str = "/chronicle/dataset_index";
-const ACTIONS_PREFIX: &str = "/chronicle/actions/";
-const ACTION_PARTITION_KEY: &str = "/chronicle/actions";
+const KEY_PREFIX: &str = "/lyra/timelines/";
+const UNITS_PREFIX: &str = "/lyra/units/";
+const UNITS_MAX: &str = "/lyra/units0"; // '0' > '/' in ASCII
+const DATASETS_PREFIX: &str = "/lyra/datasets/";
+const DATASET_PARTITION_KEY: &str = "/lyra/datasets";
+const DATASET_INDEX_KEY: &str = "/lyra/dataset_index";
+const ACTIONS_PREFIX: &str = "/lyra/actions/";
+const ACTION_PARTITION_KEY: &str = "/lyra/actions";
 
 pub struct OxiaCatalog {
     client: OxiaClient,
@@ -166,7 +166,7 @@ impl OxiaCatalog {
         Ok(meta)
     }
 
-    /// Build the key for a unit: /chronicle/units/{zone}/{sanitized_address}
+    /// Build the key for a unit: /lyra/units/{zone}/{sanitized_address}
     fn unit_key(registration: &UnitRegistration) -> String {
         let zone = if registration.zone.is_empty() {
             "default"
@@ -501,7 +501,7 @@ impl OxiaCatalog {
         let meta = TimelineMeta {
             name: name.to_string(),
             timeline_id,
-            status: chronicle_proto::pb_catalog::TimelineStatus::Active as i32,
+            status: lyra_proto::pb_catalog::TimelineStatus::Active as i32,
             term: 0,
             lra: 0,
             version: 0,
@@ -731,7 +731,7 @@ impl OxiaCatalog {
         }
     }
 
-    /// Register a unit at /chronicle/units/{zone}/{unit-id}.
+    /// Register a unit at /lyra/units/{zone}/{unit-id}.
     /// Each unit has its own key — no CAS contention between units.
     pub async fn register_unit(&self, registration: &UnitRegistration) -> Result<(), CatalogError> {
         let key = Self::unit_key(registration);
@@ -793,7 +793,7 @@ impl OxiaCatalog {
     ///
     /// Uses Oxia sequence key subscription to receive the highest vfs key
     /// each time a new vfs is written. The receiver yields the full key
-    /// string (e.g. `/chronicle/timelines/{name}/seg-0000000000000000001`).
+    /// string (e.g. `/lyra/timelines/{name}/seg-0000000000000000001`).
     pub async fn subscribe_segments(
         &self,
         timeline_name: &str,

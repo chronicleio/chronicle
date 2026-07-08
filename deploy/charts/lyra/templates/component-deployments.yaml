@@ -1,0 +1,110 @@
+{{- if .Values.xunit.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lyra-xunit
+  labels:
+    app.kubernetes.io/name: lyra-xunit
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  replicas: {{ .Values.xunit.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: lyra-xunit
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: lyra-xunit
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: xunit
+          image: "{{ .Values.xunit.image.repository }}:{{ .Values.xunit.image.tag }}"
+          imagePullPolicy: {{ .Values.xunit.image.pullPolicy }}
+          command: ["lyra"]
+          args: ["xunit", "start", "--config", "/etc/lyra/lyrad.toml"]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/lyra
+          resources:
+            {{- toYaml .Values.xunit.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: lyra-config
+{{- end }}
+{{- if .Values.sink.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lyra-sink
+  labels:
+    app.kubernetes.io/name: lyra-sink
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  replicas: {{ .Values.sink.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: lyra-sink
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: lyra-sink
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: sink
+          image: "{{ .Values.sink.image.repository }}:{{ .Values.sink.image.tag }}"
+          imagePullPolicy: {{ .Values.sink.image.pullPolicy }}
+          command: ["lyra"]
+          args: ["sink", "start", "--config", "/etc/lyra/lyrad.toml"]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/lyra
+          resources:
+            {{- toYaml .Values.sink.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: lyra-config
+{{- end }}
+{{- if .Values.lens.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lyra-lens
+  labels:
+    app.kubernetes.io/name: lyra-lens
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  replicas: {{ .Values.lens.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: lyra-lens
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: lyra-lens
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: lens
+          image: "{{ .Values.lens.image.repository }}:{{ .Values.lens.image.tag }}"
+          imagePullPolicy: {{ .Values.lens.image.pullPolicy }}
+          command: ["lyra"]
+          args: ["lens", "start", "--config", "/etc/lyra/lyrad.toml"]
+          ports:
+            - containerPort: 50051
+              name: flight-sql
+          volumeMounts:
+            - name: config
+              mountPath: /etc/lyra
+          resources:
+            {{- toYaml .Values.lens.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: lyra-config
+{{- end }}

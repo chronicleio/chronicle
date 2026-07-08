@@ -1,0 +1,30 @@
+[package]
+name = "lyra-cli"
+version = "0.1.0"
+edition = "2024"
+resolver = "3"
+
+[[bin]]
+name = "lyra"
+path = "src/main.rs"
+
+[dependencies]
+liblyra = { path = "../liblyra" }
+libxunit = { path = "../libxunit" }
+lyra-unit = { path = "../../lyrad/unit" }
+lyra-sink = { path = "../../lyrad/sink" }
+lyra-xunit = { path = "../../lyrad/xunit" }
+lyra-lens = { path = "../../lyrad/lens" }
+catalog = { path = "../../catalog" }
+arrow-array = { workspace = true }
+arrow-flight = { workspace = true }
+arrow-schema = { workspace = true }
+tonic = { workspace = true }
+clap = { workspace = true }
+futures-util = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+toml = { workspace = true }
+serde = { workspace = true }
+libc = "0.2"

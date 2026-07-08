@@ -5,8 +5,8 @@ pub mod oxia_catalog;
 pub mod types;
 
 use async_trait::async_trait;
-use chronicle_proto::pb_catalog::{Segment, TimelineMeta, UnitRegistration};
 use error::CatalogError;
+use lyra_proto::pb_catalog::{Segment, TimelineMeta, UnitRegistration};
 use oxia_catalog::OxiaCatalog;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -139,7 +139,7 @@ pub type CatalogRef = Arc<dyn Catalog>;
 
 pub fn segment_key(name: &str, start_offset: i64) -> String {
     format!(
-        "/chronicle/timelines/{}/seg-{:0>width$}",
+        "/lyra/timelines/{}/seg-{:0>width$}",
         name,
         start_offset,
         width = SEGMENT_KEY_PAD
@@ -147,12 +147,12 @@ pub fn segment_key(name: &str, start_offset: i64) -> String {
 }
 
 pub fn segment_key_prefix(name: &str) -> String {
-    format!("/chronicle/timelines/{}/seg-", name)
+    format!("/lyra/timelines/{}/seg-", name)
 }
 
 pub fn segment_key_max(name: &str) -> String {
     format!(
-        "/chronicle/timelines/{}/seg-{}",
+        "/lyra/timelines/{}/seg-{}",
         name,
         "9".repeat(SEGMENT_KEY_PAD)
     )

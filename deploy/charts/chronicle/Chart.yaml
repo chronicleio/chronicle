@@ -1,6 +1,0 @@
-apiVersion: v2
-name: chronicle
-description: A distributed indexing ss system
-version: 0.1.0
-appVersion: "0.1.0"
-type: application

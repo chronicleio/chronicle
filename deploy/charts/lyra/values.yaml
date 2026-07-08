@@ -1,0 +1,73 @@
+unit:
+  replicaCount: 3
+  image:
+    repository: lyra-unit
+    tag: dev
+    pullPolicy: IfNotPresent
+  server:
+    bindAddress: "0.0.0.0:7070"
+  ioMode: basic
+  storage:
+    size: 2Gi
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "250m"
+    limits:
+      memory: "1Gi"
+      cpu: "1"
+
+xunit:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: lyra-unit
+    tag: dev
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "250m"
+    limits:
+      memory: "1Gi"
+      cpu: "1"
+
+sink:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: lyra-unit
+    tag: dev
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+
+lens:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: lyra-unit
+    tag: dev
+    pullPolicy: IfNotPresent
+  server:
+    bindAddress: "0.0.0.0:50051"
+    endpoint: "http://lyra-lens:50051"
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+
+catalog:
+  backend: oxia
+  serviceAddress: "oxia:6648"
+
+log:
+  level: info

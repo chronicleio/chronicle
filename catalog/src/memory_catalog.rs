@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use chronicle_proto::pb_catalog::{Segment, TimelineMeta, UnitRegistration};
+use lyra_proto::pb_catalog::{Segment, TimelineMeta, UnitRegistration};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc::Receiver;

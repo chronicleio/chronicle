@@ -5,7 +5,7 @@ edition = "2024"
 resolver = "3"
 
 [dependencies]
-chronicle-proto = { workspace = true }
+lyra-proto = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

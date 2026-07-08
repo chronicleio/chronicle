@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package io.chronicle.proto.catalog.v1;
+package io.lyra.proto.catalog.v1;
 
 message TimelineMeta {
   string name = 1;

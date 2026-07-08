@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lyra-config
+  labels:
+    app.kubernetes.io/name: lyra
+    app.kubernetes.io/instance: {{ .Release.Name }}
+data:
+  lyrad.toml: |
+    io_mode = "{{ .Values.unit.ioMode }}"
+
+    [server]
+    bind_address = "{{ .Values.unit.server.bindAddress }}"
+
+    [wal]
+    dir = "/data/wal"
+
+    [storage]
+    dir = "/data/storage"
+
+    [segments]
+    dir = "/data/segments"
+
+    [catalog]
+    backend = "{{ .Values.catalog.backend }}"
+    service_address = "{{ .Values.catalog.serviceAddress }}"
+
+    [lens]
+    bind_address = "{{ .Values.lens.server.bindAddress }}"
+    endpoint = "{{ .Values.lens.server.endpoint }}"
+
+    [log]
+    level = "{{ .Values.log.level }}"
