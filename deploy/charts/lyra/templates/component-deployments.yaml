@@ -22,10 +22,10 @@ spec:
           image: "{{ .Values.xunit.image.repository }}:{{ .Values.xunit.image.tag }}"
           imagePullPolicy: {{ .Values.xunit.image.pullPolicy }}
           command: ["lyra"]
-          args: ["xunit", "start", "--config", "/etc/lyra/lyrad.toml"]
+          args: ["xunit", "start", "--config", "/etc/lyra/conf/xunit.toml"]
           volumeMounts:
             - name: config
-              mountPath: /etc/lyra
+              mountPath: /etc/lyra/conf
           resources:
             {{- toYaml .Values.xunit.resources | nindent 12 }}
       volumes:
@@ -33,76 +33,76 @@ spec:
           configMap:
             name: lyra-config
 {{- end }}
-{{- if .Values.connector.enabled }}
+{{- if .Values.functions.enabled }}
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: lyra-connector
+  name: lyra-functions
   labels:
-    app.kubernetes.io/name: lyra-connector
+    app.kubernetes.io/name: lyra-functions
     app.kubernetes.io/instance: {{ .Release.Name }}
 spec:
-  replicas: {{ .Values.connector.replicaCount }}
+  replicas: {{ .Values.functions.replicaCount }}
   selector:
     matchLabels:
-      app.kubernetes.io/name: lyra-connector
+      app.kubernetes.io/name: lyra-functions
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: lyra-connector
+        app.kubernetes.io/name: lyra-functions
         app.kubernetes.io/instance: {{ .Release.Name }}
     spec:
       containers:
-        - name: connector
-          image: "{{ .Values.connector.image.repository }}:{{ .Values.connector.image.tag }}"
-          imagePullPolicy: {{ .Values.connector.image.pullPolicy }}
+        - name: functions
+          image: "{{ .Values.functions.image.repository }}:{{ .Values.functions.image.tag }}"
+          imagePullPolicy: {{ .Values.functions.image.pullPolicy }}
           command: ["lyra"]
-          args: ["connector", "start", "--config", "/etc/lyra/lyrad.toml"]
+          args: ["functions", "start", "--config", "/etc/lyra/conf/functions.toml"]
           volumeMounts:
             - name: config
-              mountPath: /etc/lyra
+              mountPath: /etc/lyra/conf
           resources:
-            {{- toYaml .Values.connector.resources | nindent 12 }}
+            {{- toYaml .Values.functions.resources | nindent 12 }}
       volumes:
         - name: config
           configMap:
             name: lyra-config
 {{- end }}
-{{- if .Values.query.enabled }}
+{{- if .Values.orchestrator.enabled }}
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: lyra-query
+  name: lyra-orchestrator
   labels:
-    app.kubernetes.io/name: lyra-query
+    app.kubernetes.io/name: lyra-orchestrator
     app.kubernetes.io/instance: {{ .Release.Name }}
 spec:
-  replicas: {{ .Values.query.replicaCount }}
+  replicas: {{ .Values.orchestrator.replicaCount }}
   selector:
     matchLabels:
-      app.kubernetes.io/name: lyra-query
+      app.kubernetes.io/name: lyra-orchestrator
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: lyra-query
+        app.kubernetes.io/name: lyra-orchestrator
         app.kubernetes.io/instance: {{ .Release.Name }}
     spec:
       containers:
-        - name: query
-          image: "{{ .Values.query.image.repository }}:{{ .Values.query.image.tag }}"
-          imagePullPolicy: {{ .Values.query.image.pullPolicy }}
+        - name: orchestrator
+          image: "{{ .Values.orchestrator.image.repository }}:{{ .Values.orchestrator.image.tag }}"
+          imagePullPolicy: {{ .Values.orchestrator.image.pullPolicy }}
           command: ["lyra"]
-          args: ["query", "start", "--config", "/etc/lyra/lyrad.toml"]
+          args: ["orch", "start", "--config", "/etc/lyra/conf/orchestrator.toml"]
           ports:
             - containerPort: 50051
               name: flight-sql
           volumeMounts:
             - name: config
-              mountPath: /etc/lyra
+              mountPath: /etc/lyra/conf
           resources:
-            {{- toYaml .Values.query.resources | nindent 12 }}
+            {{- toYaml .Values.orchestrator.resources | nindent 12 }}
       volumes:
         - name: config
           configMap:

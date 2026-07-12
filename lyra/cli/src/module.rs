@@ -1,7 +1,7 @@
 use crate::banner;
 use crate::process;
 use catalog::{CatalogOptions, build_catalog};
-use lyra_connector::{Connector, ConnectorOptions};
+use lyra_functions::{FunctionsOptions, FunctionsRuntime};
 use lyra_xunit::Xunit;
 use serde::Deserialize;
 use std::io::IsTerminal;
@@ -10,37 +10,54 @@ use std::path::Path;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-const DEFAULT_CONFIG_PATH: &str = "/etc/lyra/lyrad.toml";
+const DEFAULT_CONFIG_DIR: &str = "/etc/lyra/conf";
 
 #[derive(Clone, Copy)]
 pub enum ModuleKind {
-    Catalog,
-    Connector,
+    Functions,
     Xunit,
-    Query,
+    Orchestrator,
 }
 
 impl ModuleKind {
     fn command_name(self) -> &'static str {
         match self {
-            Self::Catalog => "catalog",
-            Self::Connector => "connector",
+            Self::Functions => "functions",
             Self::Xunit => "xunit",
-            Self::Query => "query",
+            Self::Orchestrator => "orchestrator",
         }
     }
 
     fn display_name(self) -> &'static str {
         match self {
-            Self::Catalog => "Catalog",
-            Self::Connector => "Connector",
+            Self::Functions => "Functions",
             Self::Xunit => "XUnit",
-            Self::Query => "Query",
+            Self::Orchestrator => "Orchestrator",
         }
     }
 
     fn default_pid_file(self) -> String {
         format!("lyra-{}.pid", self.command_name())
+    }
+
+    fn config_name(self) -> &'static str {
+        match self {
+            Self::Functions => "functions",
+            Self::Xunit => "xunit",
+            Self::Orchestrator => "orchestrator",
+        }
+    }
+
+    fn config_env_var(self) -> &'static str {
+        match self {
+            Self::Functions => "LYRA_FUNCTIONS_CONFIG",
+            Self::Xunit => "LYRA_XUNIT_CONFIG",
+            Self::Orchestrator => "LYRA_ORCHESTRATOR_CONFIG",
+        }
+    }
+
+    fn default_config_path(self) -> String {
+        format!("{}/{}.toml", DEFAULT_CONFIG_DIR, self.config_name())
     }
 }
 
@@ -63,7 +80,7 @@ pub enum ModuleAction {
 pub async fn run(kind: ModuleKind, action: ModuleAction) -> Result<(), Box<dyn std::error::Error>> {
     match action {
         ModuleAction::Start { config, pid_file } => {
-            let config = load_config(config.as_deref())?;
+            let config = load_config(kind, config.as_deref())?;
             init_tracing(&config.log.level);
             banner::print_banner(kind.display_name());
 
@@ -73,11 +90,8 @@ pub async fn run(kind: ModuleKind, action: ModuleAction) -> Result<(), Box<dyn s
             let catalog = build_catalog(&config.catalog).await?;
             let mut wait_for_shutdown_after_start = true;
             match kind {
-                ModuleKind::Catalog => {
-                    info!("catalog component connected to Oxia");
-                }
-                ModuleKind::Connector => {
-                    Connector::new(catalog, ConnectorOptions::default())
+                ModuleKind::Functions => {
+                    FunctionsRuntime::new(catalog, FunctionsOptions::default())
                         .start()
                         .await?;
                 }
@@ -85,12 +99,12 @@ pub async fn run(kind: ModuleKind, action: ModuleAction) -> Result<(), Box<dyn s
                     let _xunit = Xunit::new(catalog);
                     info!("xunit component started");
                 }
-                ModuleKind::Query => {
+                ModuleKind::Orchestrator => {
                     wait_for_shutdown_after_start = false;
-                    let query = lyra_query::Query::new(catalog);
-                    lyra_query::flight_sql::serve_with_shutdown(
-                        query,
-                        config.query.bind_address,
+                    let orchestrator = lyra_orchestrator::Orchestrator::new(catalog);
+                    lyra_orchestrator::flight_sql::serve_with_shutdown(
+                        orchestrator,
+                        config.orchestrator.bind_address,
                         process::wait_for_shutdown(),
                     )
                     .await?;
@@ -123,21 +137,21 @@ struct ModuleConfig {
     #[serde(default)]
     catalog: CatalogOptions,
     #[serde(default)]
-    query: QueryConfig,
+    orchestrator: OrchestratorConfig,
     #[serde(default)]
     log: LogConfig,
 }
 
 #[derive(Debug, Deserialize)]
-struct QueryConfig {
-    #[serde(default = "default_query_bind_address")]
+struct OrchestratorConfig {
+    #[serde(default = "default_orchestrator_bind_address")]
     bind_address: SocketAddr,
 }
 
-impl Default for QueryConfig {
+impl Default for OrchestratorConfig {
     fn default() -> Self {
         Self {
-            bind_address: default_query_bind_address(),
+            bind_address: default_orchestrator_bind_address(),
         }
     }
 }
@@ -160,32 +174,41 @@ fn default_log_level() -> String {
     "info".to_string()
 }
 
-fn load_config(path: Option<&str>) -> Result<ModuleConfig, Box<dyn std::error::Error>> {
-    match resolve_config_path(path) {
+fn load_config(
+    kind: ModuleKind,
+    path: Option<&str>,
+) -> Result<ModuleConfig, Box<dyn std::error::Error>> {
+    match resolve_config_path(kind, path) {
         Some(path) => read_config(&path),
         None => Ok(ModuleConfig {
             catalog: CatalogOptions::default(),
-            query: QueryConfig::default(),
+            orchestrator: OrchestratorConfig::default(),
             log: LogConfig::default(),
         }),
     }
 }
 
-fn default_query_bind_address() -> SocketAddr {
+fn default_orchestrator_bind_address() -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 50051)
 }
 
-fn resolve_config_path(path: Option<&str>) -> Option<String> {
+fn resolve_config_path(kind: ModuleKind, path: Option<&str>) -> Option<String> {
     if let Some(path) = path {
         return Some(path.to_string());
+    }
+    if let Ok(path) = std::env::var(kind.config_env_var())
+        && !path.trim().is_empty()
+    {
+        return Some(path);
     }
     if let Ok(path) = std::env::var("LYRA_CONFIG")
         && !path.trim().is_empty()
     {
         return Some(path);
     }
-    if Path::new(DEFAULT_CONFIG_PATH).exists() {
-        return Some(DEFAULT_CONFIG_PATH.to_string());
+    let default_path = kind.default_config_path();
+    if Path::new(&default_path).exists() {
+        return Some(default_path);
     }
     None
 }

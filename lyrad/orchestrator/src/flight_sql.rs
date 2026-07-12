@@ -1,4 +1,4 @@
-use crate::{Query, QueryOutput};
+use crate::{Orchestrator, OrchestratorOutput};
 use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray};
 use arrow_flight::flight_service_server::{FlightService, FlightServiceServer};
 use arrow_flight::sql::server::{FlightSqlService, PeekableFlightDataStream};
@@ -23,25 +23,28 @@ use tracing::info;
 type FlightDataStream = Pin<Box<dyn Stream<Item = Result<FlightData, Status>> + Send + 'static>>;
 
 #[derive(Clone)]
-pub struct QueryFlightSqlService {
-    query: Arc<Query>,
+pub struct OrchestratorFlightSqlService {
+    orchestrator: Arc<Orchestrator>,
     next_handle: Arc<AtomicU64>,
-    results: Arc<Mutex<HashMap<String, QueryResult>>>,
+    results: Arc<Mutex<HashMap<String, StatementResult>>>,
 }
 
-impl QueryFlightSqlService {
-    pub fn new(query: Query) -> Self {
+impl OrchestratorFlightSqlService {
+    pub fn new(orchestrator: Orchestrator) -> Self {
         Self {
-            query: Arc::new(query),
+            orchestrator: Arc::new(orchestrator),
             next_handle: Arc::new(AtomicU64::new(1)),
             results: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    async fn stage_result(&self, output: QueryOutput) -> Result<(String, QueryResult), Status> {
-        let result = query_output_to_query_result(output).map_err(status_internal)?;
+    async fn stage_result(
+        &self,
+        output: OrchestratorOutput,
+    ) -> Result<(String, StatementResult), Status> {
+        let result = orchestrator_output_to_statement_result(output).map_err(status_internal)?;
         let id = self.next_handle.fetch_add(1, Ordering::Relaxed);
-        let handle = format!("lyra-query-{id}");
+        let handle = format!("lyra-orchestrator-{id}");
         self.results
             .lock()
             .await
@@ -51,16 +54,16 @@ impl QueryFlightSqlService {
 }
 
 pub async fn serve_with_shutdown<S>(
-    query: Query,
+    orchestrator: Orchestrator,
     bind_address: SocketAddr,
     shutdown: S,
 ) -> Result<(), tonic::transport::Error>
 where
     S: Future<Output = ()> + Send + 'static,
 {
-    let service = QueryFlightSqlService::new(query);
+    let service = OrchestratorFlightSqlService::new(orchestrator);
     let service = FlightServiceServer::new(service);
-    info!(addr = %bind_address, "query Flight SQL service starting");
+    info!(addr = %bind_address, "orchestrator Flight SQL service starting");
     tonic::transport::Server::builder()
         .add_service(service)
         .serve_with_shutdown(bind_address, shutdown)
@@ -68,7 +71,7 @@ where
 }
 
 #[tonic::async_trait]
-impl FlightSqlService for QueryFlightSqlService {
+impl FlightSqlService for OrchestratorFlightSqlService {
     type FlightService = Self;
 
     async fn get_flight_info_statement(
@@ -77,7 +80,7 @@ impl FlightSqlService for QueryFlightSqlService {
         request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
         let output = self
-            .query
+            .orchestrator
             .execute(&query.query)
             .await
             .map_err(|error| Status::invalid_argument(error.to_string()))?;
@@ -119,7 +122,7 @@ impl FlightSqlService for QueryFlightSqlService {
         _request: Request<PeekableFlightDataStream>,
     ) -> Result<i64, Status> {
         let output = self
-            .query
+            .orchestrator
             .execute(&query.query)
             .await
             .map_err(|error| Status::invalid_argument(error.to_string()))?;
@@ -130,14 +133,14 @@ impl FlightSqlService for QueryFlightSqlService {
 }
 
 #[derive(Clone)]
-struct QueryResult {
+struct StatementResult {
     schema: SchemaRef,
     batches: Vec<RecordBatch>,
     total_records: i64,
     total_bytes: i64,
 }
 
-impl QueryResult {
+impl StatementResult {
     fn new(schema: SchemaRef, batches: Vec<RecordBatch>) -> Self {
         let total_records = batches.iter().map(|batch| batch.num_rows() as i64).sum();
         let total_bytes = batches
@@ -159,11 +162,11 @@ impl QueryResult {
     }
 }
 
-fn query_output_to_query_result(
-    output: QueryOutput,
-) -> Result<QueryResult, arrow_schema::ArrowError> {
+fn orchestrator_output_to_statement_result(
+    output: OrchestratorOutput,
+) -> Result<StatementResult, arrow_schema::ArrowError> {
     let batch = match output {
-        QueryOutput::Datasets(datasets) => {
+        OrchestratorOutput::Datasets(datasets) => {
             let schema = Arc::new(Schema::new(vec![
                 Field::new("name", ArrowDataType::Utf8, false),
                 Field::new("version", ArrowDataType::Int64, false),
@@ -192,7 +195,7 @@ fn query_output_to_query_result(
                 ],
             )?
         }
-        QueryOutput::DeletedDataset(name) => {
+        OrchestratorOutput::DeletedDataset(name) => {
             let schema = Arc::new(Schema::new(vec![
                 Field::new("name", ArrowDataType::Utf8, false),
                 Field::new("operation", ArrowDataType::Utf8, false),
@@ -207,13 +210,13 @@ fn query_output_to_query_result(
         }
     };
 
-    Ok(QueryResult::new(batch.schema(), vec![batch]))
+    Ok(StatementResult::new(batch.schema(), vec![batch]))
 }
 
-fn affected_rows(output: &QueryOutput) -> i64 {
+fn affected_rows(output: &OrchestratorOutput) -> i64 {
     match output {
-        QueryOutput::Datasets(datasets) => datasets.len() as i64,
-        QueryOutput::DeletedDataset(_) => 1,
+        OrchestratorOutput::Datasets(datasets) => datasets.len() as i64,
+        OrchestratorOutput::DeletedDataset(_) => 1,
     }
 }
 
@@ -234,7 +237,7 @@ mod tests {
 
     #[test]
     fn datasets_are_encoded_as_arrow_rows() {
-        let output = QueryOutput::Datasets(vec![Versioned::new(
+        let output = OrchestratorOutput::Datasets(vec![Versioned::new(
             Dataset::new(
                 "events",
                 DatasetSchema::new(vec![DatasetField::new("payload", DataType::Json)]),
@@ -242,7 +245,7 @@ mod tests {
             7,
         )]);
 
-        let result = query_output_to_query_result(output).unwrap();
+        let result = orchestrator_output_to_statement_result(output).unwrap();
 
         assert_eq!(result.total_records, 1);
         assert_eq!(result.schema.field(0).name(), "name");
@@ -251,9 +254,10 @@ mod tests {
 
     #[test]
     fn deleted_dataset_is_encoded_as_arrow_row() {
-        let result =
-            query_output_to_query_result(QueryOutput::DeletedDataset("events".to_string()))
-                .unwrap();
+        let result = orchestrator_output_to_statement_result(OrchestratorOutput::DeletedDataset(
+            "events".to_string(),
+        ))
+        .unwrap();
 
         assert_eq!(result.total_records, 1);
         assert_eq!(result.schema.field(0).name(), "name");
@@ -263,8 +267,8 @@ mod tests {
     #[tokio::test]
     async fn flight_sql_client_creates_dataset_and_fetches_result() {
         let catalog = build_memory_catalog();
-        let query = Query::new(catalog);
-        let service = QueryFlightSqlService::new(query);
+        let orchestrator = Orchestrator::new(catalog);
+        let service = OrchestratorFlightSqlService::new(orchestrator);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();

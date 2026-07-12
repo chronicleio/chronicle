@@ -3,9 +3,11 @@ use crate::process;
 use lyra_unit::option::unit_options::UnitOptions;
 use lyra_unit::unit::Unit;
 use std::io::IsTerminal;
+use std::path::Path;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
+const DEFAULT_CONFIG_PATH: &str = "/etc/lyra/conf/unit.toml";
 const DEFAULT_PID_FILE: &str = "lyra-unit.pid";
 
 #[derive(clap::Subcommand)]
@@ -27,13 +29,8 @@ pub enum UnitAction {
 pub async fn run(action: UnitAction) -> Result<(), Box<dyn std::error::Error>> {
     match action {
         UnitAction::Start { config, pid_file } => {
-            let options: UnitOptions = match config {
-                Some(path) => {
-                    let contents = std::fs::read_to_string(&path)
-                        .map_err(|e| format!("failed to read config file '{}': {}", path, e))?;
-                    toml::from_str(&contents)
-                        .map_err(|e| format!("failed to parse config file '{}': {}", path, e))?
-                }
+            let options: UnitOptions = match resolve_config_path(config.as_deref()) {
+                Some(path) => read_config(&path)?,
                 None => UnitOptions::default(),
             };
 
@@ -71,4 +68,31 @@ pub async fn run(action: UnitAction) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+fn resolve_config_path(path: Option<&str>) -> Option<String> {
+    if let Some(path) = path {
+        return Some(path.to_string());
+    }
+    if let Ok(path) = std::env::var("LYRA_UNIT_CONFIG")
+        && !path.trim().is_empty()
+    {
+        return Some(path);
+    }
+    if let Ok(path) = std::env::var("LYRA_CONFIG")
+        && !path.trim().is_empty()
+    {
+        return Some(path);
+    }
+    if Path::new(DEFAULT_CONFIG_PATH).exists() {
+        return Some(DEFAULT_CONFIG_PATH.to_string());
+    }
+    None
+}
+
+fn read_config(path: &str) -> Result<UnitOptions, Box<dyn std::error::Error>> {
+    let contents = std::fs::read_to_string(path)
+        .map_err(|error| format!("failed to read config file '{}': {}", path, error))?;
+    toml::from_str(&contents)
+        .map_err(|error| format!("failed to parse config file '{}': {}", path, error).into())
 }

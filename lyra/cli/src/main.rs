@@ -17,11 +17,7 @@ enum Commands {
         #[command(subcommand)]
         action: UnitAction,
     },
-    Catalog {
-        #[command(subcommand)]
-        action: ModuleAction,
-    },
-    Connector {
+    Functions {
         #[command(subcommand)]
         action: ModuleAction,
     },
@@ -29,7 +25,8 @@ enum Commands {
         #[command(subcommand)]
         action: ModuleAction,
     },
-    Query {
+    #[command(alias = "orchestrator")]
+    Orch {
         #[command(subcommand)]
         action: ModuleAction,
     },
@@ -43,12 +40,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         Commands::Unit { action } => lyra_cli::unit::run(action).await?,
-        Commands::Catalog { action } => lyra_cli::module::run(ModuleKind::Catalog, action).await?,
-        Commands::Connector { action } => {
-            lyra_cli::module::run(ModuleKind::Connector, action).await?
+        Commands::Functions { action } => {
+            lyra_cli::module::run(ModuleKind::Functions, action).await?
         }
         Commands::Xunit { action } => lyra_cli::module::run(ModuleKind::Xunit, action).await?,
-        Commands::Query { action } => lyra_cli::module::run(ModuleKind::Query, action).await?,
+        Commands::Orch { action } => {
+            lyra_cli::module::run(ModuleKind::Orchestrator, action).await?
+        }
         Commands::Sql(args) => lyra_cli::sql::run(args).await?,
         Commands::Verify(args) => {
             tracing_subscriber::fmt()

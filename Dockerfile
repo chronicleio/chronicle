@@ -18,11 +18,11 @@ RUN cargo build --release -p lyra-cli
 RUN cp target/release/lyra /usr/local/bin/lyra && \
     rm -rf /build/target
 
-COPY lyrad.toml /etc/lyra/lyrad.toml
+COPY conf/ /etc/lyra/conf/
 
 RUN mkdir -p /data/wal /data/storage /data/segments /data/lexicon
 
 EXPOSE 7070 7071 50051 8080
 
 ENTRYPOINT ["lyra"]
-CMD ["unit", "start", "--config", "/etc/lyra/lyrad.toml"]
+CMD ["unit", "start", "--config", "/etc/lyra/conf/unit.toml"]

@@ -25,8 +25,8 @@ spec:
           args:
             - |
               POD_DNS="$(hostname).lyra-unit-headless.{{ .Release.Namespace }}.svc.cluster.local"
-              sed "s/\[server\]/[server]\nadvertise_address = \"http:\/\/${POD_DNS}:7070\"/" /etc/lyra/lyrad.toml > /tmp/lyrad.toml
-              exec lyra unit start --config /tmp/lyrad.toml
+              sed "s/\[server\]/[server]\nadvertise_address = \"http:\/\/${POD_DNS}:7070\"/" /etc/lyra/conf/unit.toml > /tmp/unit.toml
+              exec lyra unit start --config /tmp/unit.toml
           ports:
             - containerPort: 7070
               name: grpc
@@ -34,7 +34,7 @@ spec:
               name: metrics
           volumeMounts:
             - name: config
-              mountPath: /etc/lyra
+              mountPath: /etc/lyra/conf
             - name: data
               mountPath: /data
           resources:

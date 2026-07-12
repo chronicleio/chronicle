@@ -1139,8 +1139,8 @@ dependencies = [
  "futures-util",
  "libc",
  "liblyra",
- "lyra-connector",
- "lyra-query",
+ "lyra-functions",
+ "lyra-orchestrator",
  "lyra-unit",
  "lyra-xunit",
  "serde",
@@ -1152,7 +1152,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "lyra-connector"
+name = "lyra-functions"
 version = "0.1.0"
 dependencies = [
  "catalog",
@@ -1162,18 +1162,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "lyra-proto"
-version = "0.1.0"
-dependencies = [
- "prost 0.13.5",
- "prost-build",
- "prost-types 0.14.1",
- "tonic",
- "tonic-build",
-]
-
-[[package]]
-name = "lyra-query"
+name = "lyra-orchestrator"
 version = "0.1.0"
 dependencies = [
  "arrow-array",
@@ -1187,6 +1176,17 @@ dependencies = [
  "tokio-stream",
  "tonic",
  "tracing",
+]
+
+[[package]]
+name = "lyra-proto"
+version = "0.1.0"
+dependencies = [
+ "prost 0.13.5",
+ "prost-build",
+ "prost-types 0.14.1",
+ "tonic",
+ "tonic-build",
 ]
 
 [[package]]

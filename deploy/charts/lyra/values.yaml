@@ -32,11 +32,11 @@ xunit:
       memory: "1Gi"
       cpu: "1"
 
-connector:
+functions:
   enabled: true
   replicaCount: 1
   image:
-    repository: lyra-connector
+    repository: lyra-functions
     tag: dev
     pullPolicy: IfNotPresent
   resources:
@@ -47,16 +47,16 @@ connector:
       memory: "512Mi"
       cpu: "500m"
 
-query:
+orchestrator:
   enabled: true
   replicaCount: 1
   image:
-    repository: lyra-query
+    repository: lyra-orchestrator
     tag: dev
     pullPolicy: IfNotPresent
   server:
     bindAddress: "0.0.0.0:50051"
-    endpoint: "http://lyra-query:50051"
+    endpoint: "http://lyra-orchestrator:50051"
   resources:
     requests:
       memory: "128Mi"
@@ -68,6 +68,7 @@ query:
 catalog:
   backend: oxia
   serviceAddress: "oxia:6648"
+  namespace: "default"
 
 log:
   level: info

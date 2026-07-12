@@ -1,0 +1,10 @@
+[catalog]
+service_address = "localhost:6648"
+namespace = "default"
+
+[orchestrator]
+bind_address = "127.0.0.1:50051"
+endpoint = "http://127.0.0.1:50051"
+
+[log]
+level = "info"
