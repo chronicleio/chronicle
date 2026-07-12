@@ -6,7 +6,7 @@ resolver = "3"
 
 [dependencies]
 catalog = { path = "../../catalog" }
-libxunit = { path = "../../lyra/libxunit" }
+liblyra = { path = "../../lyra/liblyra" }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 

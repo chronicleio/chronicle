@@ -6,5 +6,5 @@ mod output;
 mod planner;
 mod service;
 
-pub use output::LensOutput;
-pub use service::Lens;
+pub use output::QueryOutput;
+pub use service::Query;

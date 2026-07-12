@@ -2,7 +2,7 @@ use catalog::error::CatalogError;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-pub enum LensError {
+pub enum QueryError {
     #[error("Invalid SQL statement: {0}")]
     InvalidStatement(String),
     #[error("Unsupported SQL statement: {0}")]

@@ -33,68 +33,68 @@ spec:
           configMap:
             name: lyra-config
 {{- end }}
-{{- if .Values.sink.enabled }}
+{{- if .Values.connector.enabled }}
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: lyra-sink
+  name: lyra-connector
   labels:
-    app.kubernetes.io/name: lyra-sink
+    app.kubernetes.io/name: lyra-connector
     app.kubernetes.io/instance: {{ .Release.Name }}
 spec:
-  replicas: {{ .Values.sink.replicaCount }}
+  replicas: {{ .Values.connector.replicaCount }}
   selector:
     matchLabels:
-      app.kubernetes.io/name: lyra-sink
+      app.kubernetes.io/name: lyra-connector
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: lyra-sink
+        app.kubernetes.io/name: lyra-connector
         app.kubernetes.io/instance: {{ .Release.Name }}
     spec:
       containers:
-        - name: sink
-          image: "{{ .Values.sink.image.repository }}:{{ .Values.sink.image.tag }}"
-          imagePullPolicy: {{ .Values.sink.image.pullPolicy }}
+        - name: connector
+          image: "{{ .Values.connector.image.repository }}:{{ .Values.connector.image.tag }}"
+          imagePullPolicy: {{ .Values.connector.image.pullPolicy }}
           command: ["lyra"]
-          args: ["sink", "start", "--config", "/etc/lyra/lyrad.toml"]
+          args: ["connector", "start", "--config", "/etc/lyra/lyrad.toml"]
           volumeMounts:
             - name: config
               mountPath: /etc/lyra
           resources:
-            {{- toYaml .Values.sink.resources | nindent 12 }}
+            {{- toYaml .Values.connector.resources | nindent 12 }}
       volumes:
         - name: config
           configMap:
             name: lyra-config
 {{- end }}
-{{- if .Values.lens.enabled }}
+{{- if .Values.query.enabled }}
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: lyra-lens
+  name: lyra-query
   labels:
-    app.kubernetes.io/name: lyra-lens
+    app.kubernetes.io/name: lyra-query
     app.kubernetes.io/instance: {{ .Release.Name }}
 spec:
-  replicas: {{ .Values.lens.replicaCount }}
+  replicas: {{ .Values.query.replicaCount }}
   selector:
     matchLabels:
-      app.kubernetes.io/name: lyra-lens
+      app.kubernetes.io/name: lyra-query
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: lyra-lens
+        app.kubernetes.io/name: lyra-query
         app.kubernetes.io/instance: {{ .Release.Name }}
     spec:
       containers:
-        - name: lens
-          image: "{{ .Values.lens.image.repository }}:{{ .Values.lens.image.tag }}"
-          imagePullPolicy: {{ .Values.lens.image.pullPolicy }}
+        - name: query
+          image: "{{ .Values.query.image.repository }}:{{ .Values.query.image.tag }}"
+          imagePullPolicy: {{ .Values.query.image.pullPolicy }}
           command: ["lyra"]
-          args: ["lens", "start", "--config", "/etc/lyra/lyrad.toml"]
+          args: ["query", "start", "--config", "/etc/lyra/lyrad.toml"]
           ports:
             - containerPort: 50051
               name: flight-sql
@@ -102,7 +102,7 @@ spec:
             - name: config
               mountPath: /etc/lyra
           resources:
-            {{- toYaml .Values.lens.resources | nindent 12 }}
+            {{- toYaml .Values.query.resources | nindent 12 }}
       volumes:
         - name: config
           configMap:

@@ -1,5 +1,5 @@
 use catalog::error::CatalogError;
-use libxunit::error::XunitClientError;
+use liblyra::xunit::error::XunitClientError;
 use thiserror::Error;
 
 #[derive(Debug, Error)]

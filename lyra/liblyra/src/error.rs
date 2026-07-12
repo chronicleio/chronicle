@@ -1,6 +1,6 @@
 use crate::error_inner::InnerError;
+use crate::xunit::error::XunitClientError;
 use catalog::error::CatalogError;
-use libxunit::error::XunitClientError;
 use thiserror::Error;
 
 #[derive(Error, Debug, Clone)]

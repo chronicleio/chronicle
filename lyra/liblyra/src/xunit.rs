@@ -5,8 +5,9 @@ use catalog::{
     Action, ActionRequest, DatasetName, Offset, OffsetRange, PartitionId, SchemaId, SnapshotId,
     Versioned,
 };
-use error::XunitClientError;
 use serde::{Deserialize, Serialize};
+
+pub use error::XunitClientError;
 
 #[async_trait]
 pub trait XunitClient: Send + Sync {

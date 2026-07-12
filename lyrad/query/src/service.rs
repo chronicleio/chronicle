@@ -1,35 +1,35 @@
-use crate::error::LensError;
-use crate::output::LensOutput;
-use crate::planner::{LensCommand, plan_statement};
+use crate::error::QueryError;
+use crate::output::QueryOutput;
+use crate::planner::{QueryCommand, plan_statement};
 use catalog::{CatalogRef, Dataset, DatasetField};
 
-pub struct Lens {
+pub struct Query {
     catalog: CatalogRef,
 }
 
-impl Lens {
+impl Query {
     pub fn new(catalog: CatalogRef) -> Self {
         Self { catalog }
     }
 
-    pub async fn execute(&self, sql: &str) -> Result<LensOutput, LensError> {
+    pub async fn execute(&self, sql: &str) -> Result<QueryOutput, QueryError> {
         match plan_statement(sql)? {
-            LensCommand::CreateDataset(dataset) => Ok(LensOutput::Datasets(vec![
+            QueryCommand::CreateDataset(dataset) => Ok(QueryOutput::Datasets(vec![
                 self.catalog.create_dataset(dataset).await?,
             ])),
-            LensCommand::AlterDataset(statement) => {
+            QueryCommand::AlterDataset(statement) => {
                 let current = self.catalog.get_dataset(&statement.name).await?;
                 let dataset = apply_alteration(current.value, statement.operation)?;
-                Ok(LensOutput::Datasets(vec![
+                Ok(QueryOutput::Datasets(vec![
                     self.catalog
                         .update_dataset(dataset, current.version)
                         .await?,
                 ]))
             }
-            LensCommand::DeleteDataset(name) => {
+            QueryCommand::DeleteDataset(name) => {
                 let current = self.catalog.get_dataset(&name).await?;
                 self.catalog.delete_dataset(&name, current.version).await?;
-                Ok(LensOutput::DeletedDataset(name))
+                Ok(QueryOutput::DeletedDataset(name))
             }
         }
     }
@@ -38,7 +38,7 @@ impl Lens {
 fn apply_alteration(
     mut dataset: Dataset,
     operation: crate::ddl::AlterDatasetOperation,
-) -> Result<Dataset, LensError> {
+) -> Result<Dataset, QueryError> {
     match operation {
         crate::ddl::AlterDatasetOperation::AddField(field) => add_field(&mut dataset, field)?,
         crate::ddl::AlterDatasetOperation::DropField(name) => drop_field(&mut dataset, &name)?,
@@ -47,14 +47,14 @@ fn apply_alteration(
     Ok(dataset)
 }
 
-fn add_field(dataset: &mut Dataset, field: DatasetField) -> Result<(), LensError> {
+fn add_field(dataset: &mut Dataset, field: DatasetField) -> Result<(), QueryError> {
     if dataset
         .schema
         .fields
         .iter()
         .any(|existing| existing.name == field.name)
     {
-        return Err(LensError::InvalidStatement(format!(
+        return Err(QueryError::InvalidStatement(format!(
             "dataset '{}' already has field '{}'",
             dataset.name, field.name
         )));
@@ -63,11 +63,11 @@ fn add_field(dataset: &mut Dataset, field: DatasetField) -> Result<(), LensError
     Ok(())
 }
 
-fn drop_field(dataset: &mut Dataset, name: &str) -> Result<(), LensError> {
+fn drop_field(dataset: &mut Dataset, name: &str) -> Result<(), QueryError> {
     let original_len = dataset.schema.fields.len();
     dataset.schema.fields.retain(|field| field.name != name);
     if dataset.schema.fields.len() == original_len {
-        return Err(LensError::InvalidStatement(format!(
+        return Err(QueryError::InvalidStatement(format!(
             "dataset '{}' does not have field '{}'",
             dataset.name, name
         )));
@@ -83,15 +83,15 @@ mod tests {
     #[tokio::test]
     async fn create_dataset_uses_catalog_sql() {
         let catalog = build_memory_catalog();
-        let lens = Lens::new(catalog);
+        let query = Query::new(catalog);
 
-        let output = lens
+        let output = query
             .execute("create dataset events (id int64 not null, payload json)")
             .await
             .unwrap();
 
         match output {
-            LensOutput::Datasets(datasets) => {
+            QueryOutput::Datasets(datasets) => {
                 assert_eq!(datasets.len(), 1);
                 assert_eq!(datasets[0].value.name, "events");
                 assert_eq!(datasets[0].value.schema.fields.len(), 2);
@@ -104,18 +104,19 @@ mod tests {
     #[tokio::test]
     async fn alter_dataset_adds_field() {
         let catalog = build_memory_catalog();
-        let lens = Lens::new(catalog);
+        let query = Query::new(catalog);
 
-        lens.execute("create dataset events (payload json)")
+        query
+            .execute("create dataset events (payload json)")
             .await
             .unwrap();
-        let output = lens
+        let output = query
             .execute("alter dataset events add field user_id string not null")
             .await
             .unwrap();
 
         match output {
-            LensOutput::Datasets(datasets) => {
+            QueryOutput::Datasets(datasets) => {
                 let dataset = &datasets[0].value;
                 assert_eq!(dataset.schema.version, 2);
                 assert_eq!(dataset.schema.fields.len(), 2);
@@ -129,18 +130,19 @@ mod tests {
     #[tokio::test]
     async fn alter_dataset_drops_field() {
         let catalog = build_memory_catalog();
-        let lens = Lens::new(catalog);
+        let query = Query::new(catalog);
 
-        lens.execute("create dataset events (payload json, user_id string)")
+        query
+            .execute("create dataset events (payload json, user_id string)")
             .await
             .unwrap();
-        let output = lens
+        let output = query
             .execute("alter dataset events drop field user_id")
             .await
             .unwrap();
 
         match output {
-            LensOutput::Datasets(datasets) => {
+            QueryOutput::Datasets(datasets) => {
                 let dataset = &datasets[0].value;
                 assert_eq!(dataset.schema.version, 2);
                 assert_eq!(dataset.schema.fields.len(), 1);
@@ -153,15 +155,16 @@ mod tests {
     #[tokio::test]
     async fn delete_dataset_removes_catalog_entry() {
         let catalog = build_memory_catalog();
-        let lens = Lens::new(catalog.clone());
+        let query = Query::new(catalog.clone());
 
-        lens.execute("create dataset events (payload json)")
+        query
+            .execute("create dataset events (payload json)")
             .await
             .unwrap();
-        let output = lens.execute("delete dataset events").await.unwrap();
+        let output = query.execute("delete dataset events").await.unwrap();
 
         match output {
-            LensOutput::DeletedDataset(name) => assert_eq!(name, "events"),
+            QueryOutput::DeletedDataset(name) => assert_eq!(name, "events"),
             other => panic!("unexpected output: {other:?}"),
         }
         assert!(catalog.get_dataset("events").await.is_err());
@@ -170,9 +173,9 @@ mod tests {
     #[tokio::test]
     async fn rejects_non_dataset_ddl_sql() {
         let catalog = build_memory_catalog();
-        let lens = Lens::new(catalog);
+        let query = Query::new(catalog);
 
-        let error = lens.execute("show datasets").await.unwrap_err();
+        let error = query.execute("show datasets").await.unwrap_err();
 
         assert_eq!(
             error.to_string(),

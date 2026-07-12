@@ -6,6 +6,7 @@ mod error_inner;
 pub mod lyra;
 pub mod metric;
 pub mod timeline;
+pub mod xunit;
 
 #[derive(Debug, Clone)]
 pub struct Event {

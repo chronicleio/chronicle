@@ -5,7 +5,7 @@ use lyra_cli::unit::UnitAction;
 use lyra_cli::verify::VerifyArgs;
 
 #[derive(Parser)]
-#[command(name = "lyra", about = "Lyra event streaming CLI")]
+#[command(name = "lyra", about = "Lyra distributed streaming data platform CLI")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -21,7 +21,7 @@ enum Commands {
         #[command(subcommand)]
         action: ModuleAction,
     },
-    Sink {
+    Connector {
         #[command(subcommand)]
         action: ModuleAction,
     },
@@ -29,7 +29,7 @@ enum Commands {
         #[command(subcommand)]
         action: ModuleAction,
     },
-    Lens {
+    Query {
         #[command(subcommand)]
         action: ModuleAction,
     },
@@ -44,9 +44,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::Unit { action } => lyra_cli::unit::run(action).await?,
         Commands::Catalog { action } => lyra_cli::module::run(ModuleKind::Catalog, action).await?,
-        Commands::Sink { action } => lyra_cli::module::run(ModuleKind::Sink, action).await?,
+        Commands::Connector { action } => {
+            lyra_cli::module::run(ModuleKind::Connector, action).await?
+        }
         Commands::Xunit { action } => lyra_cli::module::run(ModuleKind::Xunit, action).await?,
-        Commands::Lens { action } => lyra_cli::module::run(ModuleKind::Lens, action).await?,
+        Commands::Query { action } => lyra_cli::module::run(ModuleKind::Query, action).await?,
         Commands::Sql(args) => lyra_cli::sql::run(args).await?,
         Commands::Verify(args) => {
             tracing_subscriber::fmt()

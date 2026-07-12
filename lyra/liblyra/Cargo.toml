@@ -7,7 +7,6 @@ resolver = "3"
 [dependencies]
 lyra-proto = { workspace = true }
 catalog = { path = "../../catalog" }
-libxunit = { path = "../libxunit" }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 futures-util = { workspace = true }
@@ -26,6 +25,3 @@ opentelemetry_sdk = { workspace = true }
 base64 = "0.22"
 backoff = { version = "0.4", features = ["tokio"] }
 log = "0.4.28"
-
-[dev-dependencies]
-lyra-xunit = { path = "../../lyrad/xunit" }

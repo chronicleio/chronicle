@@ -1,7 +1,7 @@
 use crate::banner;
 use crate::process;
 use catalog::{CatalogOptions, build_catalog};
-use lyra_sink::{Sink, SinkOptions};
+use lyra_connector::{Connector, ConnectorOptions};
 use lyra_xunit::Xunit;
 use serde::Deserialize;
 use std::io::IsTerminal;
@@ -15,27 +15,27 @@ const DEFAULT_CONFIG_PATH: &str = "/etc/lyra/lyrad.toml";
 #[derive(Clone, Copy)]
 pub enum ModuleKind {
     Catalog,
-    Sink,
+    Connector,
     Xunit,
-    Lens,
+    Query,
 }
 
 impl ModuleKind {
     fn command_name(self) -> &'static str {
         match self {
             Self::Catalog => "catalog",
-            Self::Sink => "sink",
+            Self::Connector => "connector",
             Self::Xunit => "xunit",
-            Self::Lens => "lens",
+            Self::Query => "query",
         }
     }
 
     fn display_name(self) -> &'static str {
         match self {
             Self::Catalog => "Catalog",
-            Self::Sink => "Sink",
+            Self::Connector => "Connector",
             Self::Xunit => "XUnit",
-            Self::Lens => "Lens",
+            Self::Query => "Query",
         }
     }
 
@@ -76,19 +76,21 @@ pub async fn run(kind: ModuleKind, action: ModuleAction) -> Result<(), Box<dyn s
                 ModuleKind::Catalog => {
                     info!("catalog component connected to Oxia");
                 }
-                ModuleKind::Sink => {
-                    Sink::new(catalog, SinkOptions::default()).start().await?;
+                ModuleKind::Connector => {
+                    Connector::new(catalog, ConnectorOptions::default())
+                        .start()
+                        .await?;
                 }
                 ModuleKind::Xunit => {
                     let _xunit = Xunit::new(catalog);
                     info!("xunit component started");
                 }
-                ModuleKind::Lens => {
+                ModuleKind::Query => {
                     wait_for_shutdown_after_start = false;
-                    let lens = lyra_lens::Lens::new(catalog);
-                    lyra_lens::flight_sql::serve_with_shutdown(
-                        lens,
-                        config.lens.bind_address,
+                    let query = lyra_query::Query::new(catalog);
+                    lyra_query::flight_sql::serve_with_shutdown(
+                        query,
+                        config.query.bind_address,
                         process::wait_for_shutdown(),
                     )
                     .await?;
@@ -121,21 +123,21 @@ struct ModuleConfig {
     #[serde(default)]
     catalog: CatalogOptions,
     #[serde(default)]
-    lens: LensConfig,
+    query: QueryConfig,
     #[serde(default)]
     log: LogConfig,
 }
 
 #[derive(Debug, Deserialize)]
-struct LensConfig {
-    #[serde(default = "default_lens_bind_address")]
+struct QueryConfig {
+    #[serde(default = "default_query_bind_address")]
     bind_address: SocketAddr,
 }
 
-impl Default for LensConfig {
+impl Default for QueryConfig {
     fn default() -> Self {
         Self {
-            bind_address: default_lens_bind_address(),
+            bind_address: default_query_bind_address(),
         }
     }
 }
@@ -163,13 +165,13 @@ fn load_config(path: Option<&str>) -> Result<ModuleConfig, Box<dyn std::error::E
         Some(path) => read_config(&path),
         None => Ok(ModuleConfig {
             catalog: CatalogOptions::default(),
-            lens: LensConfig::default(),
+            query: QueryConfig::default(),
             log: LogConfig::default(),
         }),
     }
 }
 
-fn default_lens_bind_address() -> SocketAddr {
+fn default_query_bind_address() -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 50051)
 }
 

@@ -2,7 +2,7 @@ pub mod error;
 
 use catalog::{Action, ActionRequest, CatalogRef, DatasetName, Offset, PartitionId, Versioned};
 use error::XunitError;
-use libxunit::{
+use liblyra::xunit::{
     AppendRowsRequest, AppendRowsResponse, RowBatch, RowData, ScanRequest, ScanResponse,
     XunitClient, error::XunitClientError,
 };

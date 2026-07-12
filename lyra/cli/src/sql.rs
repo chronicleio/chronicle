@@ -38,8 +38,8 @@ pub async fn run(args: SqlArgs) -> Result<(), Box<dyn std::error::Error>> {
         .compact()
         .try_init();
 
-    let endpoint = args.endpoint.unwrap_or(config.lens.endpoint);
-    info!(endpoint = %endpoint, "connecting to lens Flight SQL endpoint");
+    let endpoint = args.endpoint.unwrap_or(config.query.endpoint);
+    info!(endpoint = %endpoint, "connecting to query Flight SQL endpoint");
     let mut client = connect_client(&endpoint).await?;
 
     if let Some(statement) = args.execute {
@@ -184,21 +184,21 @@ fn value_to_string(array: &dyn Array, row: usize) -> String {
 #[derive(Debug, Deserialize)]
 struct SqlConfig {
     #[serde(default)]
-    lens: LensClientConfig,
+    query: QueryClientConfig,
     #[serde(default)]
     log: LogConfig,
 }
 
 #[derive(Debug, Deserialize)]
-struct LensClientConfig {
-    #[serde(default = "default_lens_endpoint")]
+struct QueryClientConfig {
+    #[serde(default = "default_query_endpoint")]
     endpoint: String,
 }
 
-impl Default for LensClientConfig {
+impl Default for QueryClientConfig {
     fn default() -> Self {
         Self {
-            endpoint: default_lens_endpoint(),
+            endpoint: default_query_endpoint(),
         }
     }
 }
@@ -221,7 +221,7 @@ fn default_log_level() -> String {
     "info".to_string()
 }
 
-fn default_lens_endpoint() -> String {
+fn default_query_endpoint() -> String {
     "http://127.0.0.1:50051".to_string()
 }
 
@@ -229,7 +229,7 @@ fn load_config(path: Option<&str>) -> Result<SqlConfig, Box<dyn std::error::Erro
     match resolve_config_path(path) {
         Some(path) => read_config(&path),
         None => Ok(SqlConfig {
-            lens: LensClientConfig::default(),
+            query: QueryClientConfig::default(),
             log: LogConfig::default(),
         }),
     }

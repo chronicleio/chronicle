@@ -1,4 +1,4 @@
-use crate::error::LensError;
+use crate::error::QueryError;
 use catalog::{DataType, Dataset, DatasetField, DatasetName, DatasetSchema};
 
 #[derive(Debug, Clone)]
@@ -13,7 +13,7 @@ pub(crate) enum AlterDatasetOperation {
     DropField(String),
 }
 
-pub(crate) fn parse_create_dataset(statement: &str) -> Result<Option<Dataset>, LensError> {
+pub(crate) fn parse_create_dataset(statement: &str) -> Result<Option<Dataset>, QueryError> {
     let lower = statement.to_ascii_lowercase();
     if !lower.starts_with("create dataset ") {
         return Ok(None);
@@ -22,17 +22,17 @@ pub(crate) fn parse_create_dataset(statement: &str) -> Result<Option<Dataset>, L
     let rest = statement["create dataset ".len()..].trim();
     let open = rest
         .find('(')
-        .ok_or_else(|| LensError::InvalidStatement(statement.to_string()))?;
+        .ok_or_else(|| QueryError::InvalidStatement(statement.to_string()))?;
     let close = rest
         .rfind(')')
-        .ok_or_else(|| LensError::InvalidStatement(statement.to_string()))?;
+        .ok_or_else(|| QueryError::InvalidStatement(statement.to_string()))?;
     if close <= open {
-        return Err(LensError::InvalidStatement(statement.to_string()));
+        return Err(QueryError::InvalidStatement(statement.to_string()));
     }
 
     let name = rest[..open].trim();
     if name.is_empty() {
-        return Err(LensError::InvalidStatement(statement.to_string()));
+        return Err(QueryError::InvalidStatement(statement.to_string()));
     }
 
     let fields_sql = &rest[open + 1..close];
@@ -40,7 +40,7 @@ pub(crate) fn parse_create_dataset(statement: &str) -> Result<Option<Dataset>, L
     for field_sql in fields_sql.split(',') {
         let tokens: Vec<_> = field_sql.split_whitespace().collect();
         if tokens.len() < 2 {
-            return Err(LensError::InvalidStatement(statement.to_string()));
+            return Err(QueryError::InvalidStatement(statement.to_string()));
         }
         let mut field = DatasetField::new(tokens[0], parse_data_type(tokens[1])?);
         if tokens.len() >= 4
@@ -53,7 +53,7 @@ pub(crate) fn parse_create_dataset(statement: &str) -> Result<Option<Dataset>, L
     }
 
     if fields.is_empty() {
-        return Err(LensError::InvalidStatement(statement.to_string()));
+        return Err(QueryError::InvalidStatement(statement.to_string()));
     }
 
     Ok(Some(Dataset::new(name, DatasetSchema::new(fields))))
@@ -61,7 +61,7 @@ pub(crate) fn parse_create_dataset(statement: &str) -> Result<Option<Dataset>, L
 
 pub(crate) fn parse_alter_dataset(
     statement: &str,
-) -> Result<Option<AlterDatasetStatement>, LensError> {
+) -> Result<Option<AlterDatasetStatement>, QueryError> {
     let lower = statement.to_ascii_lowercase();
     if !lower.starts_with("alter dataset ") {
         return Ok(None);
@@ -69,16 +69,16 @@ pub(crate) fn parse_alter_dataset(
 
     let tokens: Vec<_> = statement.split_whitespace().collect();
     if tokens.len() < 5 {
-        return Err(LensError::InvalidStatement(statement.to_string()));
+        return Err(QueryError::InvalidStatement(statement.to_string()));
     }
     if !tokens[0].eq_ignore_ascii_case("alter") || !tokens[1].eq_ignore_ascii_case("dataset") {
-        return Err(LensError::InvalidStatement(statement.to_string()));
+        return Err(QueryError::InvalidStatement(statement.to_string()));
     }
 
     let name = tokens[2].to_string();
     if tokens[3].eq_ignore_ascii_case("add") && tokens[4].eq_ignore_ascii_case("field") {
         if tokens.len() < 7 {
-            return Err(LensError::InvalidStatement(statement.to_string()));
+            return Err(QueryError::InvalidStatement(statement.to_string()));
         }
         let field = parse_field(&tokens[5..], statement)?;
         return Ok(Some(AlterDatasetStatement {
@@ -89,7 +89,7 @@ pub(crate) fn parse_alter_dataset(
 
     if tokens[3].eq_ignore_ascii_case("drop") && tokens[4].eq_ignore_ascii_case("field") {
         if tokens.len() != 6 {
-            return Err(LensError::InvalidStatement(statement.to_string()));
+            return Err(QueryError::InvalidStatement(statement.to_string()));
         }
         return Ok(Some(AlterDatasetStatement {
             name,
@@ -97,26 +97,26 @@ pub(crate) fn parse_alter_dataset(
         }));
     }
 
-    Err(LensError::InvalidStatement(statement.to_string()))
+    Err(QueryError::InvalidStatement(statement.to_string()))
 }
 
-pub(crate) fn parse_delete_dataset(statement: &str) -> Result<Option<DatasetName>, LensError> {
+pub(crate) fn parse_delete_dataset(statement: &str) -> Result<Option<DatasetName>, QueryError> {
     let tokens: Vec<_> = statement.split_whitespace().collect();
     if tokens.is_empty() || !tokens[0].eq_ignore_ascii_case("delete") {
         return Ok(None);
     }
     if tokens.len() != 3 || !tokens[1].eq_ignore_ascii_case("dataset") {
-        return Err(LensError::InvalidStatement(statement.to_string()));
+        return Err(QueryError::InvalidStatement(statement.to_string()));
     }
     if tokens[2].is_empty() {
-        return Err(LensError::InvalidStatement(statement.to_string()));
+        return Err(QueryError::InvalidStatement(statement.to_string()));
     }
     Ok(Some(tokens[2].to_string()))
 }
 
-fn parse_field(tokens: &[&str], statement: &str) -> Result<DatasetField, LensError> {
+fn parse_field(tokens: &[&str], statement: &str) -> Result<DatasetField, QueryError> {
     if tokens.len() < 2 {
-        return Err(LensError::InvalidStatement(statement.to_string()));
+        return Err(QueryError::InvalidStatement(statement.to_string()));
     }
     let mut field = DatasetField::new(tokens[0], parse_data_type(tokens[1])?);
     if tokens.len() == 4
@@ -125,12 +125,12 @@ fn parse_field(tokens: &[&str], statement: &str) -> Result<DatasetField, LensErr
     {
         field.nullable = false;
     } else if tokens.len() != 2 {
-        return Err(LensError::InvalidStatement(statement.to_string()));
+        return Err(QueryError::InvalidStatement(statement.to_string()));
     }
     Ok(field)
 }
 
-pub(crate) fn parse_data_type(value: &str) -> Result<DataType, LensError> {
+pub(crate) fn parse_data_type(value: &str) -> Result<DataType, QueryError> {
     match value.to_ascii_lowercase().as_str() {
         "bool" | "boolean" => Ok(DataType::Boolean),
         "int" | "int32" | "integer" => Ok(DataType::Int32),
@@ -142,7 +142,7 @@ pub(crate) fn parse_data_type(value: &str) -> Result<DataType, LensError> {
         "date" => Ok(DataType::Date),
         "timestamp" => Ok(DataType::Timestamp),
         "json" => Ok(DataType::Json),
-        _ => Err(LensError::InvalidStatement(format!(
+        _ => Err(QueryError::InvalidStatement(format!(
             "unsupported data type: {value}"
         ))),
     }

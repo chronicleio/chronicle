@@ -21,7 +21,7 @@ xunit:
   enabled: true
   replicaCount: 1
   image:
-    repository: lyra-unit
+    repository: lyra-xunit
     tag: dev
     pullPolicy: IfNotPresent
   resources:
@@ -32,11 +32,11 @@ xunit:
       memory: "1Gi"
       cpu: "1"
 
-sink:
+connector:
   enabled: true
   replicaCount: 1
   image:
-    repository: lyra-unit
+    repository: lyra-connector
     tag: dev
     pullPolicy: IfNotPresent
   resources:
@@ -47,16 +47,16 @@ sink:
       memory: "512Mi"
       cpu: "500m"
 
-lens:
+query:
   enabled: true
   replicaCount: 1
   image:
-    repository: lyra-unit
+    repository: lyra-query
     tag: dev
     pullPolicy: IfNotPresent
   server:
     bindAddress: "0.0.0.0:50051"
-    endpoint: "http://lyra-lens:50051"
+    endpoint: "http://lyra-query:50051"
   resources:
     requests:
       memory: "128Mi"

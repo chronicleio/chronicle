@@ -2,9 +2,9 @@ use crate::conn::ConnOptions;
 use crate::conn::conn_pool::ConnPool;
 use crate::error::LyraError;
 use crate::timeline::Timeline;
+use crate::xunit::{AppendRowsRequest, RowData, ScanRequest, XunitClient};
 use crate::{Event, Offset, TimelineOptions};
 use catalog::{CatalogRef, Dataset, OffsetRange, Versioned};
-use libxunit::{AppendRowsRequest, RowData, ScanRequest, XunitClient};
 use opentelemetry::metrics::Meter;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -187,13 +187,50 @@ async fn next_dataset_offset(xunit: &dyn XunitClient, dataset: &str) -> Result<i
 #[cfg(test)]
 mod tests {
     use super::*;
-    use catalog::{DataType, DatasetField, DatasetSchema, build_memory_catalog};
-    use lyra_xunit::Xunit;
+    use crate::xunit::{AppendRowsResponse, RowBatch, ScanResponse, error::XunitClientError};
+    use catalog::{
+        Action, ActionRequest, DataType, DatasetField, DatasetSchema, build_memory_catalog,
+    };
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct TestXunit {
+        rows: Mutex<Vec<RowData>>,
+    }
+
+    #[async_trait::async_trait]
+    impl XunitClient for TestXunit {
+        async fn append_rows(
+            &self,
+            request: AppendRowsRequest,
+        ) -> Result<AppendRowsResponse, XunitClientError> {
+            self.rows.lock().unwrap().extend(request.rows);
+            Ok(AppendRowsResponse {
+                committed_offset: request.offset_range.end - 1,
+            })
+        }
+
+        async fn scan(&self, _request: ScanRequest) -> Result<ScanResponse, XunitClientError> {
+            let rows = self.rows.lock().unwrap().clone();
+            Ok(ScanResponse {
+                batches: vec![RowBatch { schema_id: 1, rows }],
+            })
+        }
+
+        async fn submit_action(
+            &self,
+            _request: ActionRequest,
+        ) -> Result<Versioned<Action>, XunitClientError> {
+            Err(XunitClientError::Internal(
+                "test xunit does not submit actions".into(),
+            ))
+        }
+    }
 
     #[tokio::test]
     async fn dataset_create_write_and_read_round_trip() {
         let catalog = build_memory_catalog();
-        let xunit = Arc::new(Xunit::new(catalog.clone()));
+        let xunit = Arc::new(TestXunit::default());
         let lyra = Lyra::with_xunit(catalog, LyraOptions::new(), xunit);
 
         lyra.create_dataset(Dataset::new(

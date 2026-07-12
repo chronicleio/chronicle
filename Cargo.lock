@@ -1065,10 +1065,8 @@ dependencies = [
  "catalog",
  "dashmap",
  "futures-util",
- "libxunit",
  "log",
  "lyra-proto",
- "lyra-xunit",
  "opentelemetry",
  "opentelemetry_sdk",
  "prost 0.13.5",
@@ -1109,16 +1107,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "libxunit"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "catalog",
- "serde",
- "thiserror",
-]
-
-[[package]]
 name = "linux-raw-sys"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1151,9 +1139,8 @@ dependencies = [
  "futures-util",
  "libc",
  "liblyra",
- "libxunit",
- "lyra-lens",
- "lyra-sink",
+ "lyra-connector",
+ "lyra-query",
  "lyra-unit",
  "lyra-xunit",
  "serde",
@@ -1165,19 +1152,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "lyra-lens"
+name = "lyra-connector"
 version = "0.1.0"
 dependencies = [
- "arrow-array",
- "arrow-flight",
- "arrow-schema",
  "catalog",
- "futures-util",
- "prost 0.13.5",
+ "liblyra",
  "thiserror",
- "tokio",
- "tokio-stream",
- "tonic",
  "tracing",
 ]
 
@@ -1193,13 +1173,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "lyra-sink"
+name = "lyra-query"
 version = "0.1.0"
 dependencies = [
+ "arrow-array",
+ "arrow-flight",
+ "arrow-schema",
  "catalog",
- "liblyra",
- "libxunit",
+ "futures-util",
+ "prost 0.13.5",
  "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tonic",
  "tracing",
 ]
 
@@ -1237,7 +1223,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "catalog",
- "libxunit",
+ "liblyra",
  "thiserror",
  "tokio",
 ]
