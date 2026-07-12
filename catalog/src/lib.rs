@@ -159,6 +159,7 @@ pub fn segment_key_max(name: &str) -> String {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct CatalogOptions {
     #[serde(default = "default_service_address")]
     pub service_address: String,

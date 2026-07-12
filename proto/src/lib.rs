@@ -7,6 +7,3 @@ pub mod pb_storage {
 pub mod pb_catalog {
     tonic::include_proto!("io.lyra.proto.catalog.v1");
 }
-pub mod pb_admin {
-    tonic::include_proto!("io.lyra.proto.admin.v1");
-}

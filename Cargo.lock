@@ -1139,43 +1139,13 @@ dependencies = [
  "futures-util",
  "libc",
  "liblyra",
- "lyra-functions",
- "lyra-orchestrator",
  "lyra-unit",
- "lyra-xunit",
  "serde",
  "tokio",
  "toml",
  "tonic",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "lyra-functions"
-version = "0.1.0"
-dependencies = [
- "catalog",
- "liblyra",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "lyra-orchestrator"
-version = "0.1.0"
-dependencies = [
- "arrow-array",
- "arrow-flight",
- "arrow-schema",
- "catalog",
- "futures-util",
- "prost 0.13.5",
- "thiserror",
- "tokio",
- "tokio-stream",
- "tonic",
- "tracing",
 ]
 
 [[package]]
@@ -1215,17 +1185,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "xxhash-rust",
-]
-
-[[package]]
-name = "lyra-xunit"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "catalog",
- "liblyra",
- "thiserror",
- "tokio",
 ]
 
 [[package]]

@@ -4,9 +4,6 @@ members = [
     "proto",
     "catalog",
     "lyrad/unit",
-    "lyrad/functions",
-    "lyrad/xunit",
-    "lyrad/orchestrator",
     "lyra/liblyra",
     "lyra/cli",
 ]

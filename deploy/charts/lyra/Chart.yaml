@@ -1,6 +1,6 @@
 apiVersion: v2
 name: lyra
-description: A distributed streaming data platform
+description: A distributed streaming engine
 version: 0.1.0
 appVersion: "0.1.0"
 type: application

@@ -22,7 +22,7 @@ COPY conf/ /etc/lyra/conf/
 
 RUN mkdir -p /data/wal /data/storage /data/segments /data/lexicon
 
-EXPOSE 7070 7071 50051 8080
+EXPOSE 7070 7071 8080
 
 ENTRYPOINT ["lyra"]
 CMD ["unit", "start", "--config", "/etc/lyra/conf/unit.toml"]

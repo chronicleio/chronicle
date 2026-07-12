@@ -11,9 +11,6 @@ path = "src/main.rs"
 [dependencies]
 liblyra = { path = "../liblyra" }
 lyra-unit = { path = "../../lyrad/unit" }
-lyra-functions = { path = "../../lyrad/functions" }
-lyra-xunit = { path = "../../lyrad/xunit" }
-lyra-orchestrator = { path = "../../lyrad/orchestrator" }
 catalog = { path = "../../catalog" }
 arrow-array = { workspace = true }
 arrow-flight = { workspace = true }

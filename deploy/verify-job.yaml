@@ -17,8 +17,7 @@ spec:
           imagePullPolicy: IfNotPresent
           command: ["lyra", "verify"]
           args:
-            - --catalog=memory
-            - --backend=memory
+            - --catalog=oxia:6648
             - --timelines=4
             - --rate=100
             - --replication-factor=3

@@ -1,11 +1,10 @@
 use clap::Parser;
-use lyra_cli::module::{ModuleAction, ModuleKind};
 use lyra_cli::sql::SqlArgs;
 use lyra_cli::unit::UnitAction;
 use lyra_cli::verify::VerifyArgs;
 
 #[derive(Parser)]
-#[command(name = "lyra", about = "Lyra distributed streaming data platform CLI")]
+#[command(name = "lyra", about = "Lyra distributed streaming engine CLI")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -17,19 +16,6 @@ enum Commands {
         #[command(subcommand)]
         action: UnitAction,
     },
-    Functions {
-        #[command(subcommand)]
-        action: ModuleAction,
-    },
-    Xunit {
-        #[command(subcommand)]
-        action: ModuleAction,
-    },
-    #[command(alias = "orchestrator")]
-    Orch {
-        #[command(subcommand)]
-        action: ModuleAction,
-    },
     Sql(SqlArgs),
     Verify(VerifyArgs),
 }
@@ -40,13 +26,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         Commands::Unit { action } => lyra_cli::unit::run(action).await?,
-        Commands::Functions { action } => {
-            lyra_cli::module::run(ModuleKind::Functions, action).await?
-        }
-        Commands::Xunit { action } => lyra_cli::module::run(ModuleKind::Xunit, action).await?,
-        Commands::Orch { action } => {
-            lyra_cli::module::run(ModuleKind::Orchestrator, action).await?
-        }
         Commands::Sql(args) => lyra_cli::sql::run(args).await?,
         Commands::Verify(args) => {
             tracing_subscriber::fmt()

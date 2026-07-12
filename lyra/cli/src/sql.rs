@@ -12,7 +12,7 @@ use tonic::transport::{Channel, Endpoint};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-const DEFAULT_CONFIG_PATH: &str = "/etc/lyra/conf/orchestrator.toml";
+const DEFAULT_CONFIG_PATH: &str = "/etc/lyra/conf/sql.toml";
 
 #[derive(Debug, Args)]
 pub struct SqlArgs {
@@ -38,8 +38,8 @@ pub async fn run(args: SqlArgs) -> Result<(), Box<dyn std::error::Error>> {
         .compact()
         .try_init();
 
-    let endpoint = args.endpoint.unwrap_or(config.orchestrator.endpoint);
-    info!(endpoint = %endpoint, "connecting to orchestrator Flight SQL endpoint");
+    let endpoint = args.endpoint.unwrap_or(config.sql.endpoint);
+    info!(endpoint = %endpoint, "connecting to Flight SQL endpoint");
     let mut client = connect_client(&endpoint).await?;
 
     if let Some(statement) = args.execute {
@@ -184,21 +184,21 @@ fn value_to_string(array: &dyn Array, row: usize) -> String {
 #[derive(Debug, Deserialize)]
 struct SqlConfig {
     #[serde(default)]
-    orchestrator: OrchestratorClientConfig,
+    sql: SqlClientConfig,
     #[serde(default)]
     log: LogConfig,
 }
 
 #[derive(Debug, Deserialize)]
-struct OrchestratorClientConfig {
-    #[serde(default = "default_orchestrator_endpoint")]
+struct SqlClientConfig {
+    #[serde(default = "default_sql_endpoint")]
     endpoint: String,
 }
 
-impl Default for OrchestratorClientConfig {
+impl Default for SqlClientConfig {
     fn default() -> Self {
         Self {
-            endpoint: default_orchestrator_endpoint(),
+            endpoint: default_sql_endpoint(),
         }
     }
 }
@@ -221,7 +221,7 @@ fn default_log_level() -> String {
     "info".to_string()
 }
 
-fn default_orchestrator_endpoint() -> String {
+fn default_sql_endpoint() -> String {
     "http://127.0.0.1:50051".to_string()
 }
 
@@ -229,7 +229,7 @@ fn load_config(path: Option<&str>) -> Result<SqlConfig, Box<dyn std::error::Erro
     match resolve_config_path(path) {
         Some(path) => read_config(&path),
         None => Ok(SqlConfig {
-            orchestrator: OrchestratorClientConfig::default(),
+            sql: SqlClientConfig::default(),
             log: LogConfig::default(),
         }),
     }
@@ -240,11 +240,6 @@ fn resolve_config_path(path: Option<&str>) -> Option<String> {
         return Some(path.to_string());
     }
     if let Ok(path) = std::env::var("LYRA_SQL_CONFIG")
-        && !path.trim().is_empty()
-    {
-        return Some(path);
-    }
-    if let Ok(path) = std::env::var("LYRA_ORCHESTRATOR_CONFIG")
         && !path.trim().is_empty()
     {
         return Some(path);

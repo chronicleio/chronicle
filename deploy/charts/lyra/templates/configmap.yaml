@@ -23,34 +23,3 @@ data:
 
     [log]
     level = "{{ .Values.log.level }}"
-
-  xunit.toml: |
-    [catalog]
-    backend = "{{ .Values.catalog.backend }}"
-    service_address = "{{ .Values.catalog.serviceAddress }}"
-    namespace = "{{ .Values.catalog.namespace }}"
-
-    [log]
-    level = "{{ .Values.log.level }}"
-
-  functions.toml: |
-    [catalog]
-    backend = "{{ .Values.catalog.backend }}"
-    service_address = "{{ .Values.catalog.serviceAddress }}"
-    namespace = "{{ .Values.catalog.namespace }}"
-
-    [log]
-    level = "{{ .Values.log.level }}"
-
-  orchestrator.toml: |
-    [catalog]
-    backend = "{{ .Values.catalog.backend }}"
-    service_address = "{{ .Values.catalog.serviceAddress }}"
-    namespace = "{{ .Values.catalog.namespace }}"
-
-    [orchestrator]
-    bind_address = "{{ .Values.orchestrator.server.bindAddress }}"
-    endpoint = "{{ .Values.orchestrator.server.endpoint }}"
-
-    [log]
-    level = "{{ .Values.log.level }}"

@@ -611,7 +611,7 @@
       "collapsed": false,
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 129 },
       "id": 90,
-      "title": "Catalog & Admin",
+      "title": "Catalog",
       "type": "row"
     },
     {
@@ -650,43 +650,6 @@
         { "expr": "histogram_quantile(0.99, sum by (le, instance) (rate(lyra_server_catalog_latency_seconds_bucket[5m])))", "legendFormat": "{{instance}} p99" }
       ],
       "title": "Catalog Latency per Instance",
-      "type": "timeseries"
-    },
-    {
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" },
-          "unit": "ops"
-        }
-      },
-      "gridPos": { "h": 10, "w": 12, "x": 0, "y": 140 },
-      "id": 93,
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
-      "targets": [
-        { "expr": "rate(lyra_server_admin_requests_total[5m])", "legendFormat": "{{instance}}" }
-      ],
-      "title": "Admin Request Rate per Instance",
-      "type": "timeseries"
-    },
-    {
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" },
-          "unit": "s"
-        }
-      },
-      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 140 },
-      "id": 94,
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
-      "targets": [
-        { "expr": "histogram_quantile(0.50, sum by (le, instance) (rate(lyra_server_admin_latency_seconds_bucket[5m])))", "legendFormat": "{{instance}} p50" },
-        { "expr": "histogram_quantile(0.99, sum by (le, instance) (rate(lyra_server_admin_latency_seconds_bucket[5m])))", "legendFormat": "{{instance}} p99" }
-      ],
-      "title": "Admin Latency per Instance",
       "type": "timeseries"
     }
   ],

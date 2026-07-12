@@ -1,6 +1,0 @@
-[catalog]
-service_address = "localhost:6648"
-namespace = "default"
-
-[log]
-level = "info"
