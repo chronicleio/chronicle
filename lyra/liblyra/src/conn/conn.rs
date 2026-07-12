@@ -230,9 +230,11 @@ impl Conn {
     pub async fn fetch(&self, request: FetchEventsRequest) -> Result<FetchStream, LyraError> {
         let timeline_id = request.timeline_id;
         let (tx, rx) = mpsc::channel::<Result<FetchEventsResponse, LyraError>>(64);
-        let entry = self.fetch_subscribers.entry(timeline_id);
-        self.fetch_stream.send(request).await?;
-        entry.insert(tx);
+        self.fetch_subscribers.insert(timeline_id, tx);
+        if let Err(error) = self.fetch_stream.send(request).await {
+            self.fetch_subscribers.remove(&timeline_id);
+            return Err(error);
+        }
         Ok(FetchStream {
             rx,
             timeline_id,

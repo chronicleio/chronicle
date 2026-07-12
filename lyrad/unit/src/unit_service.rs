@@ -2,8 +2,8 @@ use crate::storage::Storage;
 use futures_util::{Stream, StreamExt};
 use lyra_proto::pb_ext::lyra_server::Lyra;
 use lyra_proto::pb_ext::{
-    FenceRequest, FenceResponse, FetchEventsRequest, FetchEventsResponse, RecordEventsRequest,
-    RecordEventsResponse, StatusCode,
+    ChunkType, FenceRequest, FenceResponse, FetchEventsRequest, FetchEventsResponse,
+    RecordEventsRequest, RecordEventsResponse, StatusCode,
 };
 use prost::Message;
 use std::collections::VecDeque;
@@ -18,6 +18,7 @@ use tonic::{Request, Response, Status, Streaming};
 use tracing::warn;
 
 const RESPONSE_BUFFER: usize = 4;
+const FETCH_CHUNK_SIZE: usize = 1024;
 
 #[derive(Clone)]
 pub(crate) struct UnitService {
@@ -83,6 +84,13 @@ impl UnitService {
             inflight_capacity: self.inflight_capacity,
         }
     }
+
+    fn fetch_stream_context(&self) -> FetchStreamContext {
+        FetchStreamContext {
+            storage: self.storage.clone(),
+            context: self.context.clone(),
+        }
+    }
 }
 
 #[tonic::async_trait]
@@ -108,9 +116,17 @@ impl Lyra for UnitService {
 
     async fn fetch(
         &self,
-        _request: Request<Streaming<FetchEventsRequest>>,
+        request: Request<Streaming<FetchEventsRequest>>,
     ) -> Result<Response<Self::FetchStream>, Status> {
-        Err(Status::unimplemented("unit read path is disabled"))
+        let (tx, rx) = mpsc::channel(RESPONSE_BUFFER);
+        self.spawn_stream(run_fetch_stream(
+            request.into_inner(),
+            tx,
+            self.fetch_stream_context(),
+        ));
+
+        let output_stream = ReceiverStream::new(rx);
+        Ok(Response::new(Box::pin(output_stream) as Self::FetchStream))
     }
 
     async fn fence(
@@ -229,9 +245,11 @@ async fn run_record_stream<S>(
     S: Stream<Item = Result<RecordEventsRequest, Status>> + Send + Unpin + 'static,
 {
     let (inflight_tx, inflight_rx) = mpsc::channel(context.inflight_capacity);
+    let synced_watch = context.storage.watch_synced();
     let receive_loop =
         receive_record_requests(stream, response_tx.clone(), inflight_tx, context.clone());
-    let sync_loop = sync_record_inflight(inflight_rx, context.storage, context.context);
+    let sync_loop =
+        sync_record_inflight(inflight_rx, context.storage, context.context, synced_watch);
     tokio::join!(receive_loop, sync_loop);
 }
 
@@ -377,13 +395,14 @@ async fn sync_record_inflight(
     mut inflight_rx: mpsc::Receiver<InflightWrite>,
     storage: Arc<dyn Storage>,
     context: CancellationToken,
+    mut watch: tokio::sync::watch::Receiver<i64>,
 ) {
-    let mut synced_offset = *storage.watch_synced().borrow();
-    let mut watch = storage.watch_synced();
+    let mut synced_offset = *watch.borrow();
     let mut pending = VecDeque::new();
     let mut inflight_closed = false;
 
     loop {
+        synced_offset = synced_offset.max(*watch.borrow());
         if !drain_synced_writes(&mut pending, synced_offset, &storage, &context).await {
             fail_pending_and_close(&mut pending, &mut inflight_rx).await;
             break;
@@ -459,5 +478,304 @@ async fn fail_pending_and_close(
 async fn fail_pending_writes(pending: &mut VecDeque<InflightWrite>, status: Status) {
     while let Some(write) = pending.pop_front() {
         write.ack.fail_status(status.clone()).await;
+    }
+}
+
+#[derive(Clone)]
+struct FetchStreamContext {
+    storage: Arc<dyn Storage>,
+    context: CancellationToken,
+}
+
+async fn run_fetch_stream<S>(
+    mut stream: S,
+    response_tx: mpsc::Sender<Result<FetchEventsResponse, Status>>,
+    context: FetchStreamContext,
+) where
+    S: Stream<Item = Result<FetchEventsRequest, Status>> + Send + Unpin + 'static,
+{
+    loop {
+        let request = tokio::select! {
+            _ = context.context.cancelled() => break,
+            request = stream.next() => request,
+        };
+
+        match request {
+            Some(Ok(request)) => {
+                if response_tx.is_closed() {
+                    break;
+                }
+                if let Err(status) =
+                    handle_fetch_request(request, response_tx.clone(), context.clone()).await
+                {
+                    let _ = response_tx.send(Err(status)).await;
+                    break;
+                }
+            }
+            Some(Err(status)) => {
+                let _ = response_tx.send(Err(status)).await;
+                break;
+            }
+            None => break,
+        }
+    }
+}
+
+async fn handle_fetch_request(
+    request: FetchEventsRequest,
+    response_tx: mpsc::Sender<Result<FetchEventsResponse, Status>>,
+    context: FetchStreamContext,
+) -> Result<(), Status> {
+    if request.end_offset < request.start_offset {
+        return Err(Status::invalid_argument(
+            "fetch end_offset must be greater than or equal to start_offset",
+        ));
+    }
+
+    let events = context
+        .storage
+        .read_events(
+            request.timeline_id,
+            request.start_offset,
+            request.end_offset,
+        )
+        .await
+        .map_err(|error| Status::internal(error.to_string()))?;
+
+    if events.is_empty() {
+        send_fetch_response(
+            &response_tx,
+            FetchEventsResponse {
+                code: StatusCode::Ok.into(),
+                r#type: ChunkType::Full.into(),
+                timeline_id: request.timeline_id,
+                event: Vec::new(),
+                advanced_offset: request.start_offset,
+            },
+            &context.context,
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let chunk_count = events.len().div_ceil(FETCH_CHUNK_SIZE);
+    for (index, chunk) in events.chunks(FETCH_CHUNK_SIZE).enumerate() {
+        let chunk_type = if chunk_count == 1 {
+            ChunkType::Full
+        } else if index == 0 {
+            ChunkType::First
+        } else if index + 1 == chunk_count {
+            ChunkType::Last
+        } else {
+            ChunkType::Middle
+        };
+        let advanced_offset = chunk
+            .last()
+            .map(|event| event.offset + 1)
+            .unwrap_or(request.start_offset);
+
+        send_fetch_response(
+            &response_tx,
+            FetchEventsResponse {
+                code: StatusCode::Ok.into(),
+                r#type: chunk_type.into(),
+                timeline_id: request.timeline_id,
+                event: chunk.to_vec(),
+                advanced_offset,
+            },
+            &context.context,
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
+async fn send_fetch_response(
+    response_tx: &mpsc::Sender<Result<FetchEventsResponse, Status>>,
+    response: FetchEventsResponse,
+    context: &CancellationToken,
+) -> Result<(), Status> {
+    tokio::select! {
+        _ = context.cancelled() => Err(Status::cancelled("fetch stream cancelled")),
+        result = response_tx.send(Ok(response)) => result
+            .map_err(|_| Status::cancelled("fetch response stream closed")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::wal::WalOptions;
+    use crate::storage::{Storage, UnitStorage};
+    use futures_util::StreamExt;
+    use lyra_proto::pb_ext::{Event, RecordEventsRequestItem};
+    use tempfile::tempdir;
+
+    fn event(timeline_id: i64, offset: i64, payload: &[u8]) -> Event {
+        Event {
+            timeline_id,
+            term: 1,
+            offset,
+            payload: Some(payload.to_vec().into()),
+            crc32: None,
+            timestamp: offset * 10,
+            schema_id: 0,
+        }
+    }
+
+    async fn test_storage() -> Arc<dyn Storage> {
+        let dir = tempdir().unwrap();
+        Arc::new(
+            UnitStorage::open(WalOptions {
+                dir: dir.path().to_string_lossy().into_owned(),
+                max_segment_size: None,
+                io_mode: Default::default(),
+            })
+            .await
+            .unwrap(),
+        )
+    }
+
+    async fn collect_fetch(
+        storage: Arc<dyn Storage>,
+        requests: Vec<FetchEventsRequest>,
+    ) -> Vec<Result<FetchEventsResponse, Status>> {
+        let (tx, rx) = mpsc::channel(RESPONSE_BUFFER);
+        let context = FetchStreamContext {
+            storage,
+            context: CancellationToken::new(),
+        };
+        let request_stream = tokio_stream::iter(requests.into_iter().map(Ok));
+        run_fetch_stream(request_stream, tx, context).await;
+        ReceiverStream::new(rx).collect().await
+    }
+
+    #[tokio::test]
+    async fn fetch_returns_events_in_requested_range() {
+        let storage = test_storage().await;
+        storage.apply_write(event(7, 1, b"a"), false).await;
+        storage.apply_write(event(7, 2, b"b"), false).await;
+        storage.apply_write(event(7, 3, b"c"), false).await;
+        storage.apply_write(event(8, 1, b"other"), false).await;
+
+        let responses = collect_fetch(
+            storage,
+            vec![FetchEventsRequest {
+                timeline_id: 7,
+                start_offset: 2,
+                end_offset: 4,
+            }],
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1);
+        let response = responses.into_iter().next().unwrap().unwrap();
+        assert_eq!(response.code, StatusCode::Ok as i32);
+        assert_eq!(response.r#type, ChunkType::Full as i32);
+        assert_eq!(response.advanced_offset, 4);
+        assert_eq!(
+            response
+                .event
+                .iter()
+                .map(|event| event.offset)
+                .collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_empty_range_returns_full_empty_response() {
+        let storage = test_storage().await;
+
+        let responses = collect_fetch(
+            storage,
+            vec![FetchEventsRequest {
+                timeline_id: 7,
+                start_offset: 10,
+                end_offset: 20,
+            }],
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1);
+        let response = responses.into_iter().next().unwrap().unwrap();
+        assert_eq!(response.code, StatusCode::Ok as i32);
+        assert_eq!(response.r#type, ChunkType::Full as i32);
+        assert_eq!(response.advanced_offset, 10);
+        assert!(response.event.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fetch_rejects_invalid_range() {
+        let storage = test_storage().await;
+
+        let responses = collect_fetch(
+            storage,
+            vec![FetchEventsRequest {
+                timeline_id: 7,
+                start_offset: 20,
+                end_offset: 10,
+            }],
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1);
+        let status = responses.into_iter().next().unwrap().unwrap_err();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn record_then_fetch_round_trips_through_unit_streams() {
+        let storage = test_storage().await;
+        let (record_tx, record_rx) = mpsc::channel(RESPONSE_BUFFER);
+        let record_cancel = CancellationToken::new();
+        let record_context = RecordStreamContext {
+            storage: storage.clone(),
+            context: record_cancel.clone(),
+            inflight_capacity: 16,
+        };
+        let record_request = RecordEventsRequest {
+            items: vec![RecordEventsRequestItem {
+                event: Some(event(7, 1, b"a")),
+                trunc: false,
+                lra: 0,
+            }],
+        };
+        let record_stream = tokio_stream::iter(vec![Ok(record_request)]);
+
+        let record_handle =
+            tokio::spawn(run_record_stream(record_stream, record_tx, record_context));
+
+        let mut record_responses = ReceiverStream::new(record_rx);
+        let record_response =
+            tokio::time::timeout(std::time::Duration::from_secs(5), record_responses.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        assert_eq!(record_response.code, StatusCode::Ok as i32);
+        assert_eq!(record_response.commit_offset, 1);
+        record_cancel.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(5), record_handle)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let fetch_responses = collect_fetch(
+            storage,
+            vec![FetchEventsRequest {
+                timeline_id: 7,
+                start_offset: 1,
+                end_offset: 2,
+            }],
+        )
+        .await;
+
+        assert_eq!(fetch_responses.len(), 1);
+        let fetch_response = fetch_responses.into_iter().next().unwrap().unwrap();
+        assert_eq!(fetch_response.event.len(), 1);
+        assert_eq!(fetch_response.event[0].offset, 1);
+        assert_eq!(fetch_response.event[0].payload.as_deref(), Some(&b"a"[..]));
     }
 }

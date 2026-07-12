@@ -89,7 +89,7 @@ impl Timeline {
 
     pub async fn fetch(&self, options: FetchOptions) -> Result<EventStream, LyraError> {
         let start_offset = match options.start {
-            StartPosition::Earliest => 0,
+            StartPosition::Earliest => 1,
             StartPosition::Latest => {
                 let tc = self
                     .inner

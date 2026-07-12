@@ -20,6 +20,13 @@ pub trait Storage: Send + Sync {
 
     async fn apply_write(&self, event: Event, truncate: bool);
 
+    async fn read_events(
+        &self,
+        timeline_id: i64,
+        start_offset: i64,
+        end_offset: i64,
+    ) -> Result<Vec<Event>, UnitError>;
+
     fn check_term(&self, timeline_id: i64, request_term: i64) -> Result<(), i64>;
 
     fn fence(&self, timeline_id: i64, new_term: i64) -> Result<i64, i64>;
@@ -76,6 +83,30 @@ impl Storage for UnitStorage {
             events.retain(|stored| stored.offset < event.offset);
         }
         events.push(event);
+        events.sort_by_key(|stored| stored.offset);
+    }
+
+    async fn read_events(
+        &self,
+        timeline_id: i64,
+        start_offset: i64,
+        end_offset: i64,
+    ) -> Result<Vec<Event>, UnitError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| UnitError::Storage("unit storage lock poisoned".into()))?;
+        Ok(state
+            .events
+            .get(&timeline_id)
+            .map(|events| {
+                events
+                    .iter()
+                    .filter(|event| event.offset >= start_offset && event.offset < end_offset)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default())
     }
 
     fn check_term(&self, timeline_id: i64, request_term: i64) -> Result<(), i64> {
